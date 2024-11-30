@@ -1,23 +1,25 @@
 # standard modules
 import copy
 import logging
+import os
 # 3rd party modules
 import pandas
 # PFP modules
 from scripts import pfp_ck
-from scripts import pfp_compliance
 from scripts import pfp_gf
 from scripts import pfp_gfALT
 from scripts import pfp_gfMDS
 from scripts import pfp_gfSOLO
 from scripts import pfp_io
+from scripts import pfp_parse
 from scripts import pfp_rp
 from scripts import pfp_ts
+from scripts import pfp_uncertainty
 from scripts import pfp_utils
 
 logger = logging.getLogger("pfp_log")
 
-def l1qc(cfg):
+def l1_read_input(cfg):
     """
     Purpose:
      Reads input files, either an Excel workbook or a collection of CSV files,
@@ -30,7 +32,7 @@ def l1qc(cfg):
     Date: February 2020
     """
     # parse the L1 control file
-    l1_info = pfp_compliance.ParseL1ControlFile(cfg)
+    l1_info = pfp_parse.ParseL1ControlFile(cfg)
     # read the input file into a pandas data frame
     dfs = pfp_io.ReadInputFile(l1_info)
     # check the timestamps
@@ -53,7 +55,7 @@ def l1qc(cfg):
     pfp_utils.CheckQCFlags(ds)
     return ds
 
-def l2qc(cf,ds1):
+def l2_quality_control(cf,ds1):
     """
         Perform initial QA/QC on flux data
         Generates L2 from L1 data
@@ -88,7 +90,7 @@ def l2qc(cf,ds1):
     pfp_utils.get_coverage_individual(ds2)
     return ds2
 
-def l3qc(cf, ds2):
+def l3_post_processing(cf, ds2):
     """
     """
     # make a copy of the L2 data
@@ -96,7 +98,8 @@ def l3qc(cf, ds2):
     # set some attributes for this level
     pfp_utils.UpdateGlobalAttributes(cf, ds3, "L3")
     # parse the control file for information on how the user wants to do the gap filling
-    l3_info = pfp_compliance.ParseL3ControlFile(cf, ds3)
+    l3_info = pfp_parse.ParseL3ControlFile(cf, ds3)
+    combine_series = list(l3_info["CombineSeries"].keys())
     # check to see if we have any imports
     pfp_gf.ImportSeries(ds3, l3_info)
     # ************************
@@ -110,7 +113,8 @@ def l3qc(cf, ds2):
     # get the air temperature from the CSAT virtual temperature
     pfp_ts.TaFromTv(cf, ds3)
     # merge the HMP and corrected CSAT data
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Ta"], convert_units=True)
+    if "Ta" in combine_series:
+        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Ta"], convert_units=True)
     pfp_utils.CheckUnits(ds3, "Ta", "degC", convert_units=True)
     # ***************************
     # *** Calcuate humidities ***
@@ -121,7 +125,8 @@ def l3qc(cf, ds2):
     # *** Merge CO2 concentrations ***
     # ********************************
     # merge the CO2 concentration
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["CO2"], convert_units=True)
+    if "CO2" in combine_series:
+        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["CO2"], convert_units=True)
     # ******************************************
     # *** Calculate meteorological variables ***
     # ******************************************
@@ -157,47 +162,52 @@ def l3qc(cf, ds2):
     # convert Fco2 and Sco2 units if required
     pfp_utils.ConvertFco2Units(cf, ds3)
     # merge Fco2 and Sco2 series as required
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fco2"])
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Sco2"])
+    for label in ["Fco2", "Sco2"]:
+        if label in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"][label])
     # correct Fco2 for storage term - only recommended if storage calculated from profile available
     pfp_ts.CorrectFco2ForStorage(cf, ds3)
     # *************************
     # *** Radiation section ***
     # *************************
     # merge the radiation components
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fsd"])
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fsu"])
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fld"])
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Flu"])
+    for label in ["Fsd", "Fsu", "Fld", "Flu"]:
+        if label in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"][label])
     # calculate the net radiation from the Kipp and Zonen CNR1
     pfp_ts.CalculateNetRadiation(cf, ds3)
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fn"])
+    if "Fn" in combine_series:
+        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fn"])
     # ****************************************
     # *** Wind speed and direction section ***
     # ****************************************
     # combine wind speed from the Wind Sentry and the SONIC
-    pfp_ts.CombineSeries(cf,ds3, l3_info["CombineSeries"]["Ws"])
-    # combine wind direction from the Wind Sentry and the SONIC
-    pfp_ts.CombineSeries(cf,ds3, l3_info["CombineSeries"]["Wd"])
+    for label in ["Ws", "Wd"]:
+        if label in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"][label])
     # ********************
     # *** Soil section ***
     # ********************
     # correct soil heat flux for storage
     #    ... either average the raw ground heat flux, soil temperature and moisture
     #        and then do the correction (OzFlux "standard")
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Ts"])
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Sws"])
+    for label in ["Ts", "Sws"]:
+        if label in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"][label])
     if pfp_utils.get_optionskeyaslogical(cf, "CorrectIndividualFg"):
         #    ... or correct the individual ground heat flux measurements (James' method)
         pfp_ts.CorrectIndividualFgForStorage(cf, ds3)
-        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fg"])
+        if "Fg" in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fg"])
     else:
-        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fg"])
+        if "Fg" in combine_series:
+            pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["Fg"])
         pfp_ts.CorrectFgForStorage(cf, ds3, l3_info)
     # calculate the available energy
     pfp_ts.CalculateAvailableEnergy(ds3)
     # create additional variables using MergeSeries or AverageSeries
-    pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["extras"])
+    if "extras" in l3_info["CombineSeries"]:
+        pfp_ts.CombineSeries(cf, ds3, l3_info["CombineSeries"]["extras"])
     # calculate ET from Fe
     pfp_ts.CalculateET(ds3, l3_info)
     # Calculate Monin-Obukhov length
@@ -218,7 +228,7 @@ def l3qc(cf, ds2):
     pfp_ts.RemoveIntermediateSeries(ds3, l3_info)
     return ds3
 
-def l4qc(main_gui, cf, ds3):
+def l4_gapfill_drivers(main_gui, cf, ds3):
     ds4 = pfp_io.copy_datastructure(cf, ds3)
     # ds4 will be empty (logical false) if an error occurs in copy_datastructure
     # return from this routine if this is the case
@@ -227,7 +237,7 @@ def l4qc(main_gui, cf, ds3):
     # set some attributes for this level
     pfp_utils.UpdateGlobalAttributes(cf, ds4, "L4")
     # parse the control file for information on how the user wants to do the gap filling
-    l4_info = pfp_gf.ParseL4ControlFile(cf, ds4)
+    l4_info = pfp_parse.ParseL4ControlFile(cf, ds4)
     # check to see if we have any imports
     pfp_gf.ImportSeries(ds4, l4_info)
     # now do the meteorological driver gap filling
@@ -268,7 +278,7 @@ def l4qc(main_gui, cf, ds3):
     pfp_ts.RemoveIntermediateSeries(ds4, l4_info)
     return ds4
 
-def l5qc(main_gui, cf, ds4):
+def l5_gapfill_fluxes(main_gui, cf, ds4):
     ds5 = pfp_io.copy_datastructure(cf, ds4)
     # ds5 will be empty (logical false) if an error occurs in copy_datastructure
     # return from this routine if this is the case
@@ -277,13 +287,13 @@ def l5qc(main_gui, cf, ds4):
     # set some attributes for this level
     pfp_utils.UpdateGlobalAttributes(cf, ds5, "L5")
     # parse the control file for information on how the user wants to do the gap filling
-    l5_info = pfp_gf.ParseL5ControlFile(cf, ds5)
+    l5_info = pfp_parse.ParseL5ControlFile(cf, ds5)
     # check to see if we have any imports
     pfp_gf.ImportSeries(ds5, l5_info)
     # truncate data structure if requested
     pfp_io.TruncateDataStructure(ds5, l5_info)
     # check for missing data in the drivers
-    pfp_gf.CheckL5Drivers(ds5, l5_info)
+    pfp_gf.CheckDrivers(ds5, l5_info)
     if ds5.info["returncodes"]["value"] != 0:
         return ds5
     # now do the flux gap filling methods
@@ -292,9 +302,10 @@ def l5qc(main_gui, cf, ds4):
     if ds5.info["returncodes"]["value"] != 0:
         return ds5
     # apply the turbulence filter (if requested)
-    pfp_ck.ApplyTurbulenceFilter(cf, ds5, l5_info)
-    if ds5.info["returncodes"]["value"] != 0:
-        return ds5
+    #pfp_ck.ApplyTurbulenceFilter(cf, ds5, l5_info)
+    #if ds5.info["returncodes"]["value"] != 0:
+        #return ds5
+    pfp_ck.ApplyTurbulenceFilter(ds5, l5_info)
     # fill short gaps using interpolation
     pfp_gf.GapFillUsingInterpolation(ds5, l5_info)
     # gap fill using marginal distribution sampling
@@ -307,7 +318,7 @@ def l5qc(main_gui, cf, ds4):
             return ds5
     # fill long gaps using SOLO
     do_it = False
-    for target in l5_info["CheckL5Targets"]["targets"]:
+    for target in l5_info["CheckTargets"]["targets"]:
         if target in list(l5_info["CheckGapLengths"].keys()):
             if l5_info["CheckGapLengths"][target]["got_long_gaps"]:
                 do_it = True
@@ -318,7 +329,7 @@ def l5qc(main_gui, cf, ds4):
     # merge the gap filled drivers into a single series
     pfp_ts.MergeSeriesUsingDict(ds5, l5_info, merge_order="standard")
     # check that all targets were gap filled
-    pfp_gf.CheckL5Targets(ds5, l5_info)
+    pfp_gf.CheckTargets(ds5, l5_info)
     if ds5.info["returncodes"]["value"] != 0:
         return ds5
     # calculate Monin-Obukhov length
@@ -331,7 +342,7 @@ def l5qc(main_gui, cf, ds4):
     pfp_ts.RemoveIntermediateSeries(ds5, l5_info)
     return ds5
 
-def l6qc(main_gui, cf, ds5):
+def l6_partition(main_gui, cf, ds5):
     ds6 = pfp_io.copy_datastructure(cf, ds5)
     # ds6 will be empty (logical false) if an error occurs in copy_datastructure
     # return from this routine if this is the case
@@ -340,7 +351,7 @@ def l6qc(main_gui, cf, ds5):
     # set some attributes for this level
     pfp_utils.UpdateGlobalAttributes(cf, ds6, "L6")
     # parse the control file
-    l6_info = pfp_rp.ParseL6ControlFile(cf, ds6)
+    l6_info = pfp_parse.ParseL6ControlFile(cf, ds6)
     # check to see if we have any imports
     pfp_gf.ImportSeries(ds6, l6_info)
     # truncate data structure if requested
@@ -353,11 +364,16 @@ def l6qc(main_gui, cf, ds5):
     pfp_rp.ERUsingSOLO(main_gui, ds6, l6_info, "ERUsingSOLO")
     # estimate ER using Lloyd-Taylor
     if "ERUsingLloydTaylor" in list(l6_info.keys()):
-        # open the Excel file for writing all outputs
-        xl_name = l6_info["ERUsingLloydTaylor"]["info"]["data_file_path"]
-        xl_writer = pandas.ExcelWriter(xl_name, engine = "xlsxwriter")
-        pfp_rp.ERUsingLloydTaylor(ds6, l6_info, xl_writer)
-        xl_writer.close()
+        try:
+            # open the Excel file for writing all outputs
+            xl_name = l6_info["ERUsingLloydTaylor"]["info"]["data_file_path"]
+            xl_writer = pandas.ExcelWriter(xl_name, engine = "xlsxwriter")
+            pfp_rp.ERUsingLloydTaylor(ds6, l6_info, xl_writer)
+            xl_writer.close()
+        except RuntimeError:
+            msg = " Error using Lloyd-Taylor to estimate ER"
+            logger.error(msg)
+            xl_writer.close()
     else:
         msg = "The Lloyd-Taylor ER method is disabled in the control file"
         logger.warning(msg)
@@ -370,9 +386,9 @@ def l6qc(main_gui, cf, ds5):
             pfp_rp.ERUsingLasslop(ds6, l6_info, xl_writer)
             xl_writer.close()
         except RuntimeError:
-            xl_writer.close()
             msg = " Error using Lasslop et al to estimate ER"
             logger.error(msg)
+            xl_writer.close()
     else:
         msg = "The Lasslop ER method is disabled in the control file"
         logger.warning(msg)
@@ -395,3 +411,39 @@ def l6qc(main_gui, cf, ds5):
     # do the L6 summary
     pfp_rp.L6_summary(ds6, l6_info)
     return ds6
+
+def l7_uncertainty(main_gui, cf, ds4, mode="multiprocessing"):
+    """
+    Purpose:
+     Runs L7 to estimate the random, systematic (u* threshold percentiles) and joint
+     uncertainties in Fco2, Fe and Fh.
+     Follows the methodology used in ONEFlux.
+    Useage:
+    Side effects:
+    Author: PRI
+    Date: March 2024
+    """
+    ds7 = pfp_io.copy_datastructure(cf, ds4)
+    # parse the control file
+    l7_info = pfp_parse.ParseL7ControlFile(cf, ds7)
+    # check to see if we have any imports
+    pfp_gf.ImportSeries(ds7, l7_info)
+    # truncate data structure if requested
+    pfp_io.TruncateDataStructure(ds7, l7_info)
+    # get the ustar threshold results
+    file_path = l7_info["Files"]["file_path"]
+    cpd_filename = l7_info["Files"]["cpd_filename"]
+    ustar_results_name = os.path.join(file_path, cpd_filename)
+    ustar_results = pfp_rp.get_ustarthreshold_from_results(ustar_results_name)
+    # construct the arguments list for the multiprocessing call
+    args = pfp_uncertainty.l7_uncertainty_construct_args(ds7, l7_info, ustar_results)
+    # run the uncertainty estimation code, multiprocessing or single core
+    dsp = pfp_uncertainty.l7_uncertainty_run(args)
+    # construct the output data structure
+    dso = pfp_io.DataStructure()
+    dso.root["Attributes"] = copy.deepcopy(ds7.root["Attributes"])
+    for ds in dsp:
+        pctl = ds.root["Attributes"]["percentile"]
+        setattr(dso, str(pctl), {"Attributes": ds.root["Attributes"],
+                                 "Variables": ds.root["Variables"]})
+    return dso

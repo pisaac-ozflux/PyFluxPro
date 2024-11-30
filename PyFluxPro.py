@@ -410,6 +410,9 @@ class pfp_main_ui(QWidget):
         elif self.file["level"] in ["L6"]:
             if not pfp_compliance.l6_update_controlfile(self.file): return
             self.tabs.tab_dict[self.tabs.tab_index_all] = pfp_gui.edit_cfg_L6(self)
+        elif self.file["level"] in ["L7"]:
+            if not pfp_compliance.l7_update_controlfile(self.file): return
+            self.tabs.tab_dict[self.tabs.tab_index_all] = pfp_gui.edit_cfg_L7(self)
         elif self.file["level"] in ["nc2csv_biomet"]:
             self.tabs.tab_dict[self.tabs.tab_index_all] = pfp_gui.edit_cfg_nc2csv_biomet(self)
         elif self.file["level"] in ["nc2csv_ecostress"]:
@@ -824,6 +827,10 @@ class pfp_main_ui(QWidget):
         elif cfg["level"] == "L6":
             if pfp_compliance.check_l6_controlfile(cfg):
                 pfp_top_level.do_run_l6(self)
+            self.actionRunCurrent.setDisabled(False)
+        elif cfg["level"] == "L7":
+            if pfp_compliance.check_l7_controlfile(cfg):
+                pfp_top_level.do_run_l7(self)
             self.actionRunCurrent.setDisabled(False)
         elif cfg["level"] == "nc2csv_biomet":
             pfp_top_level.do_file_convert_nc2biomet(self, mode="custom")

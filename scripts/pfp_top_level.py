@@ -16,6 +16,7 @@ from scripts import pfp_cpd_mcnew
 from scripts import pfp_mpt
 from scripts import pfp_io
 from scripts import pfp_levels
+from scripts import pfp_parse
 from scripts import pfp_plot
 from scripts import pfp_utils
 from scripts import split_dialog
@@ -40,7 +41,7 @@ def do_file_concatenate(cfg):
     """
     logger.info(" Starting concatenation of netCDF files")
     try:
-        info = pfp_compliance.ParseConcatenateControlFile(cfg)
+        info = pfp_parse.ParseConcatenateControlFile(cfg)
         if not info["NetCDFConcatenate"]["OK"]:
             msg = " An error occurred when parsing the control file"
             logger.error(msg)
@@ -442,7 +443,7 @@ def do_file_split_run(ui):
         file_name = str(ui.lineEdit_OutputFileName.text())
         ui.info["output_file_path"] = os.path.join(file_path, file_name)
     try:
-        pfp_io.ncsplit_run(ui)
+        pfp_io.nc_split_run(ui)
     except Exception:
         msg = " Error splitting netCDF file, see below for details ..."
         logger.error(msg)
@@ -492,7 +493,7 @@ def do_run_l1(cfg):
             cfg["Options"] = {}
         cfg["Options"]["call_mode"] = "interactive"
         cfg["Options"]["show_plots"] = "Yes"
-        ds1 = pfp_levels.l1qc(cfg)
+        ds1 = pfp_levels.l1_read_input(cfg)
         if ds1.info["returncodes"]["value"] == 0:
             outfilename = pfp_io.get_outfilenamefromcf(cfg)
             pfp_io.NetCDFWrite(outfilename, ds1)
@@ -533,7 +534,7 @@ def do_run_l2(cfg):
         pfp_compliance.check_l2_options(cfg, ds1)
         if ds1.info["returncodes"]["value"] != 0:
             return
-        ds2 = pfp_levels.l2qc(cfg, ds1)
+        ds2 = pfp_levels.l2_quality_control(cfg, ds1)
         if ds2.info["returncodes"]["value"] != 0:
             logger.error("An error occurred during L2 processing")
             logger.error("")
@@ -582,7 +583,7 @@ def do_run_l3(cfg):
         if ds2.info["returncodes"]["value"] != 0:
             return
         cfg["Options"]["call_mode"] = "interactive"
-        ds3 = pfp_levels.l3qc(cfg, ds2)
+        ds3 = pfp_levels.l3_post_processing(cfg, ds2)
         if ds3.info["returncodes"]["value"] != 0:
             logger.error("An error occurred during L3 processing")
             logger.error("")
@@ -639,7 +640,7 @@ def do_run_l4(main_gui):
         if "Options" not in cfg:
             cfg["Options"]={}
         cfg["Options"]["call_mode"] = "interactive"
-        ds4 = pfp_levels.l4qc(main_gui, cfg, ds3)
+        ds4 = pfp_levels.l4_gapfill_drivers(main_gui, cfg, ds3)
         if ds4.info["returncodes"]["value"] != 0:
             logger.info("Quitting L4: " + sitename)
         else:
@@ -682,7 +683,7 @@ def do_run_l5(main_gui):
         if "Options" not in cfg:
             cfg["Options"] = {}
         cfg["Options"]["call_mode"] = "interactive"
-        ds5 = pfp_levels.l5qc(main_gui, cfg, ds4)
+        ds5 = pfp_levels.l5_gapfill_fluxes(main_gui, cfg, ds4)
         # check to see if all went well
         if ds5.info["returncodes"]["value"] != 0:
             # tell the user something went wrong
@@ -734,7 +735,7 @@ def do_run_l6(main_gui):
             cfg["Options"] = {}
         cfg["Options"]["call_mode"] = "interactive"
         cfg["Options"]["show_plots"] = "Yes"
-        ds6 = pfp_levels.l6qc(main_gui, cfg, ds5)
+        ds6 = pfp_levels.l6_partition(main_gui, cfg, ds5)
         if ds6.info["returncodes"]["value"] != 0:
             logger.info("Quitting L6: "+sitename)
         else:
@@ -745,6 +746,51 @@ def do_run_l6(main_gui):
         logger.info("")
     except Exception:
         msg = " Error running L6, see below for details ..."
+        logger.error(msg)
+        error_message = traceback.format_exc()
+        logger.error(error_message)
+    return
+def do_run_l7(main_gui):
+    """
+    Purpose:
+     Top level routine for running the L7 uncertainty..
+    Usage:
+     pfp_top_level.do_run_l7()
+    Side effects:
+     Creates an L7 netCDF file with NEE partitioned into GPP and ER along
+     with estimates of the random, systematic (ustar) and joint uncertainties.
+    Author: PRI
+    Date: February 2024
+    Mods:
+
+    """
+    try:
+        logger.info("Starting L7 processing")
+        tab_index_running = main_gui.tabs.tab_index_running
+        cfg = main_gui.tabs.tab_dict[tab_index_running].get_data_from_model()
+        in_filepath = pfp_io.get_infilenamefromcf(cfg)
+        if not pfp_utils.file_exists(in_filepath):
+            in_filename = os.path.split(in_filepath)
+            logger.error("File "+in_filename[1]+" not found")
+            return
+        ds4 = pfp_io.NetCDFRead(in_filepath)
+        if ds4.info["returncodes"]["value"] != 0: return
+        sitename = ds4.root["Attributes"]['site_name']
+        if "Options" not in cfg:
+            cfg["Options"] = {}
+        cfg["Options"]["call_mode"] = "interactive"
+        cfg["Options"]["show_plots"] = "Yes"
+        ds7 = pfp_levels.l7_uncertainty(main_gui, cfg, ds4)
+        if ds7.info["returncodes"]["value"] != 0:
+            logger.info("Quitting L7: "+sitename)
+        else:
+            logger.info("Finished L7: "+sitename)
+            outfilename = pfp_io.get_outfilenamefromcf(cfg)
+            pfp_io.NetCDFWrite(outfilename, ds7)
+            logger.info("Finished saving L7 uncertainty data")
+        logger.info("")
+    except Exception:
+        msg = " Error running L7, see below for details ..."
         logger.error(msg)
         error_message = traceback.format_exc()
         logger.error(error_message)

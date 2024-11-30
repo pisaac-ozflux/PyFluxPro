@@ -1,0 +1,109 @@
+level = L7
+[Files]
+    file_path = Right click to browse
+    in_filename = Right click to browse
+    out_filename = Right click to browse
+    plot_path = Right click to browse
+    cpd_filename = Right click to browse
+[Options]
+    AcceptDayTimes = Yes
+    ConvertToPhotons = No
+    DayNightFilter = Fsd
+    FilterList = Fco2
+    Fsd_threshold = 10
+    InterpolateType = Akima
+    KeepIntermediateSeries = No
+    MaxGapInterpolate = 3
+    TruncateToImports = Yes
+    TurbulenceFilter = ustar
+[GUI]
+    [[GapFillUsingSOLO]]
+        auto_complete = yes
+        end_date = ""
+        iterations = 500
+        learning_rate = 0.001
+        min_percent = 25
+        nda_factor = 5
+        nodes = auto
+        number_days = 60
+        number_months = 2
+        overwrite = no
+        period_option = days
+        show_all = no
+        show_plots = no
+        start_date = ""
+        training = 500
+    [[ERUsingSOLO]]
+        auto_complete = yes
+        end_date = ""
+        iterations = 500
+        learning_rate = 0.001
+        min_percent = 5
+        nda_factor = 5
+        nodes = 1
+        number_days = 90
+        number_months = 3
+        overwrite = no
+        period_option = manual
+        show_all = no
+        show_plots = no
+        start_date = ""
+        training = 500
+[Fluxes]
+    [[Fco2]]
+        [[[GapFillUsingSOLO]]]
+            [[[[Fco2_SOLO]]]]
+                drivers = Fn,Fg,SH,SHD,Ta,Ts
+        [[[MergeSeries]]]
+            source = Fco2,Fco2_SOLO
+[EcosystemRespiration]
+    [[ER_SOLO]]
+        [[[ERUsingSOLO]]]
+            [[[[ER_SOLO_all]]]]
+                target = ER
+                drivers = Ts,Ta,Sws
+        [[[MergeSeries]]]
+            source = ER,ER_SOLO_all
+    [[ER_LT]]
+        [[[ERUsingLloydTaylor]]]
+            [[[[ER_LT_all]]]]
+                target = ER
+                drivers = Ta
+                minimum_temperature_spread = 5
+                step_size_days = 5
+                window_size_days = 15
+                minimum_percent_annual = 5
+                minimum_percent_noct_window = 5
+                output_plots = False
+        [[[MergeSeries]]]
+            source = ER,ER_LT_all
+    [[ER_LL]]
+        [[[ERUsingLasslop]]]
+            [[[[ER_LL_all]]]]
+                drivers = Fsd,VPD,Ta
+                target = ER
+                step_size_days = 5
+                window_size_days = 15
+                output_plots = False
+        [[[MergeSeries]]]
+            source = ER,ER_LL_all
+[NetEcosystemExchange]
+    [[NEE_SOLO]]
+        Fco2 = Fco2
+        ER = ER_SOLO
+    [[NEE_LT]]
+        Fco2 = Fco2
+        ER = ER_LT
+    [[NEE_LL]]
+        Fco2 = Fco2
+        ER = ER_LL
+[GrossPrimaryProductivity]
+    [[GPP_SOLO]]
+        NEE = NEE_SOLO
+        ER = ER_SOLO
+    [[GPP_LT]]
+        NEE = NEE_LT
+        ER = ER_LT
+    [[GPP_LL]]
+        NEE = NEE_LL
+        ER = ER_LL

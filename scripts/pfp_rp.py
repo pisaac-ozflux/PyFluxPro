@@ -10,11 +10,12 @@ import matplotlib.pyplot as plt
 import numpy
 import pandas
 import pylab
+import scipy
 # PFP modules
 from scripts import constants as c
-from scripts import pfp_gf
+#from scripts import pfp_gf
 from scripts import pfp_gfSOLO
-from scripts import pfp_gui
+#from scripts import pfp_gui
 from scripts import pfp_io
 from scripts import pfp_part
 from scripts import pfp_ts
@@ -38,6 +39,8 @@ def CalculateNEE(ds, l6_info):
     """
     if "NetEcosystemExchange" not in l6_info:
         return
+    msg = " Calculating NEE from Fco2 and ER"
+    logger.info(msg)
     # make the L6 "description" attribute for the target variable
     descr_level = "description_" + ds.root["Attributes"]["processing_level"]
     # get the Fsd threshold
@@ -97,6 +100,8 @@ def CalculateNEP(ds, l6_info):
     Author: PRI
     Date: May 2015
     """
+    msg = " Calculating NEP from NEE"
+    logger.info(msg)
     nrecs = int(float(ds.root["Attributes"]["nc_nrecs"]))
     # make the L6 "description" attribute for the target variable
     descr_level = "description_" + ds.root["Attributes"]["processing_level"]
@@ -115,7 +120,7 @@ def CalculateNEP(ds, l6_info):
         pfp_utils.CreateVariable(ds, NEP)
     return
 
-def ERUsingLasslop(ds, l6_info, xl_writer):
+def ERUsingLasslop(ds, l6_info, xl_writer=None):
     """
     Purpose:
     Usage:
@@ -144,7 +149,7 @@ def ERUsingLasslop(ds, l6_info, xl_writer):
             raise RuntimeError(msg)
     return
 
-def ERUsingLloydTaylor(ds, l6_info, xl_writer):
+def ERUsingLloydTaylor(ds, l6_info, xl_writer=None):
     """
     Purpose:
     Usage:
@@ -268,8 +273,9 @@ def EcoResp(ds, l6_info, called_by, xl_writer):
         ER["Attr"]["comment1"] = "Drivers were {}".format(str(drivers))
         pfp_utils.CreateVariable(ds, ER)
         # Write to excel
-        params_df.to_excel(xl_writer, output)
-        xl_writer.close()
+        if xl_writer is not None:
+            sheet_name = output + " " + l6_info[called_by]["info"]["sheet_suffix"]
+            params_df.to_excel(xl_writer, sheet_name)
         # Do plotting
         startdate = str(ds.root["Variables"]["DateTime"]["Data"][0])
         enddate = str(ds.root["Variables"]["DateTime"]["Data"][-1])
@@ -295,7 +301,7 @@ def ERUsingSOLO(main_gui, ds, l6_info, called_by):
     Author: PRI
     Date: Back in the day
     Mods:
-     21/8/2017 - moved GetERFromFc from pfp_ls.l6qc() to individual
+     21/8/2017 - moved GetERFromFc from pfp_ls.l6_partition() to individual
                  ER estimation routines to allow for multiple sources
                  of ER.
     """
@@ -304,8 +310,10 @@ def ERUsingSOLO(main_gui, ds, l6_info, called_by):
     l6_info["Options"]["called_by"] = called_by
     # update the start and end dates
     ldt = ds.root["Variables"]["DateTime"]["Data"]
-    l6_info[called_by]["info"]["startdate"] = ldt[0]
-    l6_info[called_by]["info"]["enddate"] = ldt[-1]
+    l6_info[called_by]["info"]["startdate"] = ldt[0].strftime("%Y-%m-%d %H:%M")
+    l6_info[called_by]["info"]["enddate"] = ldt[-1].strftime("%Y-%m-%d %H:%M")
+    #l6_info[called_by]["info"]["startdate"] = ldt[0]
+    #l6_info[called_by]["info"]["enddate"] = ldt[-1]
     if l6_info[called_by]["info"]["call_mode"].lower() == "interactive":
         # call the ERUsingSOLO GUI
         pfp_gfSOLO.gfSOLO_gui(main_gui, ds, l6_info, called_by)
@@ -347,6 +355,8 @@ def GetERFromFco2(ds, l6_info):
     Author: PRI
     Date: October 2015
     """
+    msg = " Calculating ER from Fco2"
+    logger.info(msg)
     nrecs = int(ds.root["Attributes"]["nc_nrecs"])
     ER = {"Label": "ER"}
     # get the CO2 flux
@@ -390,6 +400,17 @@ def GetERFromFco2(ds, l6_info):
     msg += str(pc2) + "% of all data)"
     logger.info(msg)
     return
+
+def GetUstarThresholdPercentiles(ustar_results, percentile):
+    years = sorted(list(ustar_results.keys()))
+    ustar_percentiles = {}
+    for year in years:
+        ustar_percentiles[year] = {}
+        loc = ustar_results[year]["ustar_mean"]
+        scale = ustar_results[year]["ustar_sig"]
+        ustar_percentile = scipy.stats.norm.ppf(percentile, loc=loc, scale=scale)
+        ustar_percentiles[year]["ustar_mean"] = ustar_percentile
+    return ustar_percentiles
 
 def L6_summary(ds, l6_info):
     """
@@ -1234,63 +1255,6 @@ def L6_summary_cumulative(ds, series_dict, year="all"):
                 cdv[item]["Attr"][attr] = variable["Attr"][attr]
     return dsc
 
-def ParseL6ControlFile(cfg, ds):
-    """
-    Purpose:
-     Parse the L6 control file.
-    Usage:
-    Side effects:
-    Author: PRI
-    Date: Back in the day
-    """
-    # create the L6 information dictionary
-    l6_info = {}
-    l6_info["cfg"] = copy.deepcopy(cfg)
-    # summary section
-    l6_info["Summary"] = {"EcosystemRespiration":[],
-                          "NetEcosystemExchange": [],
-                          "GrossPrimaryProductivity": []}
-    # merge section
-    l6_info["MergeSeries"] = {"standard": {}}
-    # propagate the ['Files'] section
-    l6_info["Files"] = copy.deepcopy(cfg["Files"])
-    # propagate the ['Options'] section
-    l6_info["Options"] = copy.deepcopy(cfg["Options"])
-    opt = pfp_utils.get_keyvaluefromcf(cfg, ["Options"], "Fsd_threshold", default=10)
-    l6_info["Options"]["noct_threshold"] = int(float(opt))
-    opt = pfp_utils.get_keyvaluefromcf(cfg, ["Options"], "ConvertToPhotons", default=True)
-    l6_info["Options"]["convert_to_photons"] = opt
-    l6_info["Options"]["plot_raw_data"] = False
-    opt = pfp_utils.get_keyvaluefromcf(cfg, ["Options"], "PlotRawData", default="No")
-    if opt.lower() == "yes":
-        l6_info["Options"]["plot_raw_data"] = True
-    # some useful global attributes
-    l6_info["Global"] = {"site_name": ds.root["Attributes"]["site_name"],
-                         "time_step": int(float(ds.root["Attributes"]["time_step"]))}
-    # add key for suppressing output of intermediate variables e.g. Ta_aws
-    opt = pfp_utils.get_keyvaluefromcf(cfg, ["Options"], "KeepIntermediateSeries", default="No")
-    l6_info["RemoveIntermediateSeries"] = {"KeepIntermediateSeries": opt, "not_output": []}
-    if "EcosystemRespiration" in list(cfg.keys()):
-        l6_info["EcosystemRespiration"] = copy.deepcopy(cfg["EcosystemRespiration"])
-        for output in list(cfg["EcosystemRespiration"].keys()):
-            if "ERUsingSOLO" in list(cfg["EcosystemRespiration"][output].keys()):
-                rpSOLO_createdict(cfg, ds, l6_info, output, "ERUsingSOLO", 610)
-            if "ERUsingLloydTaylor" in list(cfg["EcosystemRespiration"][output].keys()):
-                rp_createdict(cfg, ds, l6_info, output, "ERUsingLloydTaylor", 620)
-            if "ERUsingLasslop" in list(cfg["EcosystemRespiration"][output].keys()):
-                rp_createdict(cfg, ds, l6_info, output, "ERUsingLasslop", 630)
-    if "NetEcosystemExchange" in list(cfg.keys()):
-        l6_info["NetEcosystemExchange"] = {}
-        for output in list(cfg["NetEcosystemExchange"].keys()):
-            rpNEE_createdict(cfg, ds, l6_info["NetEcosystemExchange"], output)
-    if "GrossPrimaryProductivity" in list(cfg.keys()):
-        l6_info["GrossPrimaryProductivity"] = {}
-        for output in list(cfg["GrossPrimaryProductivity"].keys()):
-            rpGPP_createdict(cfg, ds, l6_info["GrossPrimaryProductivity"], output)
-    if "EvapoTranspiration" in list(cfg.keys()):
-        l6_info["EvapoTranspiration"] = copy.deepcopy(cfg["EvapoTranspiration"])
-    return l6_info
-
 def PartitionNEE(ds, l6_info):
     """
     Purpose:
@@ -1307,6 +1271,8 @@ def PartitionNEE(ds, l6_info):
     """
     if "GrossPrimaryProductivity" not in l6_info:
         return
+    msg = " Calculating GPP from NEE and ER"
+    logger.info(msg)
     nrecs = int(float(ds.root["Attributes"]["nc_nrecs"]))
     # make the L6 "description" attribute for the target variable
     descr_level = "description_" + ds.root["Attributes"]["processing_level"]
@@ -1898,280 +1864,6 @@ def get_ustar_thresholds_annual(ldt,ustar_threshold):
         ustar_dict[year] = {}
         ustar_dict[year]["ustar_mean"] = ustar_threshold
     return ustar_dict
-
-def rpGPP_createdict(cf, ds, info, label):
-    """ Creates a dictionary in ds to hold information about calculating GPP."""
-    nrecs = int(float(ds.root["Attributes"]["nc_nrecs"]))
-    # create the dictionary keys for this series
-    info[label] = {}
-    # output series name
-    info[label]["output"] = label
-    # net ecosystem exchange
-    default = label.replace("GPP", "NEE")
-    opt = pfp_utils.get_keyvaluefromcf(cf, ["GrossPrimaryProductivity", label], "NEE", default=default)
-    info[label]["NEE"] = opt
-    # ecosystem respiration
-    default = label.replace("GPP", "ER")
-    opt = pfp_utils.get_keyvaluefromcf(cf, ["GrossPrimaryProductivity", label], "ER", default=default)
-    info[label]["ER"] = opt
-    # create an empty series in ds if the output series doesn't exist yet
-    if info[label]["output"] not in list(ds.root["Variables"].keys()):
-        var = pfp_utils.CreateEmptyVariable(info[label]["output"], nrecs)
-        pfp_utils.CreateVariable(ds, var)
-    return
-
-def rpMergeSeries_createdict(cf, ds, l6_info, label, called_by):
-    """ Creates a dictionary in ds to hold information about the merging of gap filled
-        and tower data."""
-    nrecs = int(ds.root["Attributes"]["nc_nrecs"])
-    # create the merge directory in the info dictionary
-    if called_by not in l6_info:
-        l6_info[called_by] = {}
-    if "standard" not in list(l6_info[called_by].keys()):
-        l6_info[called_by]["standard"] = {}
-    # create the dictionary keys for this series
-    l6_info[called_by]["standard"][label] = {}
-    # output series name
-    l6_info[called_by]["standard"][label]["output"] = label
-    # source
-    sources = pfp_utils.GetMergeSeriesKeys(cf, label, section="EcosystemRespiration")
-    l6_info[called_by]["standard"][label]["source"] = sources
-    # create an empty series in ds if the output series doesn't exist yet
-    if l6_info[called_by]["standard"][label]["output"] not in list(ds.root["Variables"].keys()):
-        variable = pfp_utils.CreateEmptyVariable(label, nrecs)
-        pfp_utils.CreateVariable(ds, variable)
-    return
-
-def rpNEE_createdict(cf, ds, info, label):
-    """ Creates a dictionary in ds to hold information about calculating NEE."""
-    nrecs = int(float(ds.root["Attributes"]["nc_nrecs"]))
-    # create the dictionary keys for this series
-    info[label] = {}
-    # output series name
-    info[label]["output"] = label
-    # CO2 flux
-    sl = ["NetEcosystemExchange", label]
-    opt = pfp_utils.get_keyvaluefromcf(cf, sl, "Fco2", default="Fco2")
-    info[label]["Fco2"] = opt
-    # ecosystem respiration
-    default = label.replace("NEE", "ER")
-    opt = pfp_utils.get_keyvaluefromcf(cf, sl, "ER", default=default)
-    info[label]["ER"] = opt
-    # create an empty series in ds if the output series doesn't exist yet
-    if info[label]["output"] not in list(ds.root["Variables"].keys()):
-        var = pfp_utils.CreateEmptyVariable(info[label]["output"], nrecs)
-        pfp_utils.CreateVariable(ds, var)
-    return
-
-def rpSOLO_createdict(cf, ds, l6_info, output, called_by, flag_code):
-    """
-    Purpose:
-     Creates a dictionary in l6_info to hold information about the SOLO data
-     used to estimate ecosystem respiration.
-    Usage:
-    Side effects:
-    Author: PRI
-    Date: Back in the day
-    """
-    nrecs = int(ds.root["Attributes"]["nc_nrecs"])
-    # make the L6 "description" attrubute for the target variable
-    descr_level = "description_" + ds.root["Attributes"]["processing_level"]
-    # create the dictionary keys for this series
-    if called_by not in list(l6_info.keys()):
-        l6_info[called_by] = {"outputs": {}, "info": {"source": "Fco2", "target": "ER"}, "gui": {}}
-        # only need to create the ["info"] dictionary on the first pass
-        pfp_gf.gfSOLO_createdict_info(cf, ds, l6_info, called_by)
-        if ds.info["returncodes"]["value"] != 0:
-            return
-        # only need to create the ["gui"] dictionary on the first pass
-        pfp_gf.gfSOLO_createdict_gui(cf, ds, l6_info, called_by)
-    # get the outputs section
-    pfp_gf.gfSOLO_createdict_outputs(cf, l6_info, output, called_by, flag_code)
-    # create an empty series in ds if the SOLO output series doesn't exist yet
-    Fco2 = pfp_utils.GetVariable(ds, l6_info[called_by]["info"]["source"])
-    model_outputs = list(cf["EcosystemRespiration"][output][called_by].keys())
-    for model_output in model_outputs:
-        if model_output not in list(ds.root["Variables"].keys()):
-            # create an empty variable
-            variable = pfp_utils.CreateEmptyVariable(model_output, nrecs)
-            variable["Attr"]["long_name"] = "Ecosystem respiration"
-            variable["Attr"]["drivers"] = l6_info[called_by]["outputs"][model_output]["drivers"]
-            variable["Attr"][descr_level] = "Modeled by neural network (SOLO)"
-            variable["Attr"]["target"] = l6_info[called_by]["info"]["target"]
-            variable["Attr"]["source"] = l6_info[called_by]["info"]["source"]
-            variable["Attr"]["units"] = Fco2["Attr"]["units"]
-            pfp_utils.CreateVariable(ds, variable)
-    return
-
-def rp_createdict(cf, ds, l6_info, output, called_by, flag_code):
-    """
-    Purpose:
-     Creates a dictionary in ds to hold information about estimating ecosystem
-     respiration
-    Usage:
-    Side effects:
-    Author: PRI, IM updated to prevent code duplication of LT and LL methods
-    Date August 2019
-    """
-
-    # Create a dict to set the description_l6 attribute
-    description_dict = {'ERUsingLasslop': "Modeled by Lasslop et al. (2010)",
-                        'ERUsingLloydTaylor': "Modeled by Lloyd-Taylor (1994)"}
-    nrecs = int(ds.root["Attributes"]["nc_nrecs"])
-    # create the settings directory
-    if called_by not in l6_info.keys():
-        l6_info[called_by] = {"outputs": {}, "info": {}, "gui": {}}
-    # get the info section
-    rp_createdict_info(cf, ds, l6_info, called_by)
-    if ds.info["returncodes"]["value"] != 0:
-        return
-    # get the outputs section
-    rp_createdict_outputs(cf, l6_info, output, called_by, flag_code)
-    # create an empty series in ds if the output series doesn't exist yet
-    Fc = pfp_utils.GetVariable(ds, l6_info[called_by]["info"]["source"])
-    model_outputs = cf["EcosystemRespiration"][output][called_by].keys()
-    for model_output in model_outputs:
-        if model_output not in ds.root["Variables"].keys():
-            # create an empty variable
-            variable = pfp_utils.CreateEmptyVariable(model_output, nrecs)
-            variable["Attr"]["long_name"] = "Ecosystem respiration"
-            variable["Attr"]["drivers"] = l6_info[called_by]["outputs"][model_output]["drivers"]
-            variable["Attr"]["description_l6"] = description_dict[called_by]
-            variable["Attr"]["target"] = l6_info[called_by]["info"]["target"]
-            variable["Attr"]["source"] = l6_info[called_by]["info"]["source"]
-            variable["Attr"]["units"] = Fc["Attr"]["units"]
-            pfp_utils.CreateVariable(ds, variable)
-    return
-
-def rp_createdict_info(cf, ds, l6_info, called_by):
-    """
-    Purpose:
-    Usage:
-    Side effects:
-    Author: PRI
-    Date: Back in the day
-          June 2019 - modified for new l5_info structure
-    """
-    erl = l6_info[called_by]
-    # Create a dict to set the file_suffix and extension
-    suffix_dict = {'ERUsingLasslop': "_Lasslop.xlsx",
-                   'ERUsingLloydTaylor': "_LloydTaylor.xlsx"}
-    # reset the return message and code
-    ds.info["returncodes"]["message"] = "OK"
-    ds.info["returncodes"]["value"] = 0
-    # time step
-    time_step = int(ds.root["Attributes"]["time_step"])
-    # get the level of processing
-    level = ds.root["Attributes"]["processing_level"]
-    # local pointer to the datetime series
-    ldt = ds.root["Variables"]["DateTime"]["Data"]
-    # add an info section to the info["solo"] dictionary
-    #erl["info"]["file_startdate"] = ldt[0].strftime("%Y-%m-%d %H:%M")
-    #erl["info"]["file_enddate"] = ldt[-1].strftime("%Y-%m-%d %H:%M")
-    erl["info"]["startdate"] = ldt[0].strftime("%Y-%m-%d %H:%M")
-    erl["info"]["enddate"] = ldt[-1].strftime("%Y-%m-%d %H:%M")
-    erl["info"]["called_by"] = called_by
-    erl["info"]["time_step"] = time_step
-    erl["info"]["source"] = "Fco2"
-    erl["info"]["target"] = "ER"
-    # check to see if this is a batch or an interactive run
-    call_mode = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "call_mode", default="interactive")
-    erl["info"]["call_mode"] = call_mode
-    erl["gui"]["show_plots"] = False
-    if call_mode.lower() == "interactive":
-        erl["gui"]["show_plots"] = True
-    # truncate to last date in Imports?
-    truncate = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "TruncateToImports", default="Yes")
-    erl["info"]["truncate_to_imports"] = truncate
-    # number of records per day and maximum lags
-    nperhr = int(float(60)/time_step + 0.5)
-    erl["info"]["nperday"] = int(float(24)*nperhr + 0.5)
-    erl["info"]["maxlags"] = int(float(12)*nperhr + 0.5)
-    # Get the data path
-    path_name = pfp_utils.get_keyvaluefromcf(cf, ["Files"], "file_path")
-    file_name = pfp_utils.get_keyvaluefromcf(cf, ["Files"], "out_filename")
-    file_name = file_name.replace(".nc", suffix_dict[called_by])
-    erl['info']['data_file_path'] = os.path.join(path_name, file_name)
-    # get the plot path
-    plot_path = pfp_utils.get_keyvaluefromcf(cf, ["Files"], "plot_path", default="./plots/")
-    plot_path = os.path.join(plot_path, level, "")
-    if not os.path.exists(plot_path):
-        try:
-            os.makedirs(plot_path)
-        except OSError:
-            msg = "Unable to create the plot path " + plot_path + "\n"
-            msg = msg + "Press 'Quit' to edit the control file.\n"
-            msg = msg + "Press 'Continue' to use the default path.\n"
-            result = pfp_gui.MsgBox_ContinueOrQuit(msg, title="Warning: L6 plot path")
-            if result.clickedButton().text() == "Quit":
-                # user wants to edit the control file
-                msg = " Quitting L6 to edit control file"
-                logger.warning(msg)
-                ds.info["returncodes"]["message"] = msg
-                ds.info["returncodes"]["value"] = 1
-            else:
-                plot_path = "./plots/"
-                cf["Files"]["plot_path"] = "./plots/"
-    erl["info"]["plot_path"] = plot_path
-    return
-
-def rp_createdict_outputs(cf, l6_info, target, called_by, flag_code):
-    """Where's the docstring ya bastard?!"""
-    erl = l6_info[called_by]
-    var_dict = {'ERUsingLasslop': "LL",
-                'ERUsingLloydTaylor': "LT"}
-    eo = erl["outputs"]
-    # loop over the outputs listed in the control file
-    section = "EcosystemRespiration"
-    outputs = cf[section][target][called_by].keys()
-    for output in outputs:
-        # add the output label to intermediate series
-        l6_info["RemoveIntermediateSeries"]["not_output"].append(output)
-        # create the dictionary keys for this series
-        eo[output] = {}
-        # get the output options
-        for key in list(cf[section][target][called_by][output].keys()):
-            eo[output][key] = cf[section][target][called_by][output][key]
-        # update the target and source
-        sl = [section, target, called_by, output]
-        eo[output]["target"] = pfp_utils.get_keyvaluefromcf(cf, sl, "target", default=target)
-        eo[output]["source"] = pfp_utils.get_keyvaluefromcf(cf, sl, "source", default=target)
-        # add the flag_code
-        eo[output]["flag_code"] = flag_code
-        # list of drivers
-        # ERUsingLloydTaylor can have 2 temperaturres e.g. Ta and Ts
-        max_drivers = 2
-        if called_by in ["ERUsingLasslop"]:
-            # ERUsingLasslop can have 4 e.g. Fsd, VPD, Ta and Ts
-            max_drivers = 4
-        opt = pfp_utils.get_keyvaluefromcf(cf, sl, "drivers", default="Ta")
-        if len(pfp_utils.string_to_list(opt)) <= max_drivers:
-            eo[output]["drivers"] = pfp_utils.string_to_list(opt)
-        else:
-            msg = " Too many drivers specified (only alowed " + str(max_drivers) + "), using Ta"
-            logger.error(msg)
-            eo[output]["drivers"] = pfp_utils.string_to_list("Ta")
-        # weighting for air temperature, soil temperature or combination
-        drivers = [d for d in eo[output]["drivers"] if d[0:2] in ["Ta", "Ts"]]
-        if len(drivers) == 1:
-            eo[output]["weighting"] = pfp_utils.string_to_list("1.0")
-        elif len(drivers) == 2:
-            default = "0.5,0.5"
-            opt = pfp_utils.get_keyvaluefromcf(cf, sl, "weighting", default=default)
-            eo[output]["weighting"] = pfp_utils.string_to_list(opt)
-        else:
-            msg = " Too many temperatures as drivers (only allowed 2), using Ta"
-            eo[output]["drivers"] = pfp_utils.string_to_list("Ta")
-            eo[output]["weighting"] = pfp_utils.string_to_list("1.0")
-        opt = pfp_utils.get_keyvaluefromcf(cf, sl, "output_plots", default="False")
-        eo[output]["output_plots"] = (opt == "True")
-        # fit statistics for plotting later on
-        eo[output]["results"] = {"startdate":[],"enddate":[],"No. points":[],"r":[],
-                                 "Bias":[],"RMSE":[],"Frac Bias":[],"NMSE":[],
-                                 "Avg (obs)":[],"Avg (" + var_dict[called_by] + ")":[],
-                                 "Var (obs)":[],"Var (" + var_dict[called_by] + ")":[],"Var ratio":[],
-                                 "m_ols":[],"b_ols":[]}
-    return
 
 def rp_initplot(**kwargs):
     # set the margins, heights, widths etc

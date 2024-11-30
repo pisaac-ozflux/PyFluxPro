@@ -1352,9 +1352,20 @@ def CreateVariable(ds, var_in, group="root", over_write=True):
         msg = " Variable " + label + " already exists in data structure, not over written"
         logger.warning(msg)
         return
-    # convert masked array to ndarray
+    # get the data into an ndarray that uses c.missing_value for missing data
     if numpy.ma.isMA(variable["Data"]):
+        # convert masked array to ndarray
         variable["Data"] = numpy.ma.filled(variable["Data"], float(c.missing_value))
+    elif isinstance(variable["Data"], numpy.ndarray):
+        if variable["Label"] !=  "DateTime":
+            # convert any numpy.nan to c.missing_value
+            idx_nan = numpy.where(numpy.isnan(variable["Data"]))[0]
+            variable["Data"][idx_nan] = float(c.missing_value)
+    else:
+        msg = " Variable " + label + " is an unrecognised type " + type(variable["Data"])
+        msg += ", skipping ..."
+        logger.error(msg)
+        return
     # coerce to numpy.float64
     if numpy.issubdtype(variable["Data"].dtype, numpy.float64):
         # already float64

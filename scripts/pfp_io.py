@@ -527,30 +527,1554 @@ def DataFrameToDataStructure(df, l1_info):
         pfp_utils.CreateVariable(ds, var)
     return ds
 
+def ds_update(ds):
+    """
+    Purpose:
+     Update the contents of a data structure.
+     This is where we can change variable names, attributes etc if we change
+     some aspect of netCDF files.  For example, V3.3.0 used for ODW2021
+     used "standard deviation" as a statistic type.  This changed to
+     "statistic_type" in V3.3.1.
+     This routine updates a data structure if required.  If the data structure
+     is modified, the original netCDF file is overwritten with the modified
+     data structure.
+    Usage:
+    Side effects:
+     The original netCDF file is overwritten if the data structure is changed.
+    Author: PRI
+    Date: November 2021
+    """
+    ds_changed = False
+    # update global attributes
+    # trap old files using nc_level and rename to processing_level
+    if "nc_level" in ds.root["Attributes"]:
+        ds.root["Attributes"]["processing_level"] = ds.root["Attributes"]["nc_level"]
+        ds_changed = True
+    # get a list of the variables in the data structure
+    labels = list(ds.root["Variables"].keys())
+    # loop over the variables in the data structure
+    for label in labels:
+        # get the variable
+        variable = pfp_utils.GetVariable(ds, label)
+        # check "statistic_type" is present
+        variable_changed = ds_update_statistic_type(variable)
+        # check to see if this variable has been changed
+        if variable_changed:
+            # write the variable to the data structure if it has changed
+            pfp_utils.CreateVariable(ds, variable)
+            ds_changed = True
+    # check to see if the data structure has changed
+    if ds_changed:
+        # write the changed data structure to file
+        file_name = os.path.basename(ds.info["filepath"])
+        msg = "  Saving updated file " + file_name
+        logger.info(msg)
+        NetCDFWrite(ds.info["filepath"], ds)
+    return ds
+
+def ds_update_statistic_type(variable):
+    """
+    Purpose:
+     Update the statistic_type attribute of a variable.
+    Usage:
+    Author: PRI
+    Date: November 2021
+    """
+    variable_changed = False
+    if variable["Label"] not in ["time", "DateTime"]:
+        if "statistic_type" not in variable["Attr"]:
+            # set the statistic_type attribute
+            variable_changed = True
+            if "Precip" in variable["Label"]:
+                variable["Attr"]["statistic_type"] = "sum"
+            elif variable["Label"][-3:] == "_Sd":
+                variable["Attr"]["statistic_type"] = "standard_deviation"
+            elif variable["Label"][-3:] == "_Vr":
+                variable["Attr"]["statistic_type"] = "variance"
+            else:
+                variable["Attr"]["statistic_type"] = "average"
+        # replace "standard deviation" with "standard_deviation"
+        else:
+            if variable["Attr"]["statistic_type"] == "standard deviation":
+                variable["Attr"]["statistic_type"] = "standard_deviation"
+                variable_changed = True
+    else:
+        pass
+    return variable_changed
+
+def ep_biomet_get_data(cfg, ds):
+    data = {}
+    ep_series_list = cfg["Variables"].keys()
+    for ep_series in ep_series_list:
+        in_name = cfg["Variables"][ep_series]["name"]
+        if in_name not in ds.root["Variables"].keys():
+            logger.error("Series " + in_name + " not in netCDF file, skipping ...")
+            ep_series_list.remove(ep_series)
+            continue
+        data[ep_series] = copy.deepcopy(ds.root["Variables"][in_name])
+        data[ep_series]["name"] = in_name
+        data[ep_series]["units"] = cfg["Variables"][ep_series]["units"]
+        fmt = cfg["Variables"][ep_series]["format"]
+        if "." in fmt:
+            numdec = len(fmt) - (fmt.index(".") + 1)
+            strfmt = "{0:." + str(numdec) + "f}"
+        else:
+            strfmt = "{0:d}"
+        data[ep_series]["format"] = strfmt
+    return data
+
+def get_controlfilecontents(cfg_file_uri, mode="verbose"):
+    """
+    Purpose:
+     Open a control fie and return its contents.
+    Author: PRI
+    Date: Back in the day
+    """
+    if mode != "quiet":
+        logger.info(" Processing the control file")
+    try:
+        cfg = ConfigObj(cfg_file_uri, indent_type="    ", list_values=False)
+    except Exception:
+        raise RuntimeError("Unable to open control file")
+    return cfg
+
+def get_ncdtype(Series):
+    sd = Series.dtype.name
+    dt = 'f'
+    if sd=='float64': dt = 'd'
+    if sd=='int32': dt = 'i'
+    if sd=='int64': dt = 'l'
+    return dt
+
+def get_filename_dialog(file_path='.', title='Choose a file', ext="*.*"):
+    """
+    Purpose:
+     Put up a file open dialog and let the user browse to open a file
+    Usage:
+     fname = pfp_io.get_filename_dialog(path=<path_to_file>,title=<tile>)
+     where path  - the path to the file location, optional
+           title - the title for the file open dialog, optional
+    Returns:
+     fname - the full file name including path, string
+    Author: PRI
+    Date: Back in the day
+    """
+    file_name = QtWidgets.QFileDialog.getOpenFileName(caption=title, directory=file_path, filter=ext)[0]
+    return str(file_name)
+
+def get_output_filename_dialog(file_path=".", title="Choose an output file ...", ext="*.*"):
+    file_name = QtWidgets.QFileDialog.getSaveFileName(caption=title, directory=file_path, filter=ext)[0]
+    return str(file_name)
+
+def get_infilenamefromcf(cf):
+    path = pfp_utils.get_keyvaluefromcf(cf,["Files"],"file_path",default="")
+    path = os.path.join(str(path), "")
+    name = pfp_utils.get_keyvaluefromcf(cf,["Files"],"in_filename",default="")
+    return str(path)+str(name)
+
+def get_outfilenamefromcf(cfg):
+    """
+    Purpose:
+     Return the output file name from a control file.
+    Author: PRI
+    Date: Back in the day
+    """
+    # check to see what type of control file we have
+    if cfg["level"] in ["concatenate"]:
+        # concatenation control files use a different syntax
+        out_file_uri = pfp_utils.get_keyvaluefromcf(cfg, ["Files", "Out"], "ncFileName")
+    else:
+        # everything else gets here
+        path = pfp_utils.get_keyvaluefromcf(cfg, ["Files"], "file_path")
+        name = pfp_utils.get_keyvaluefromcf(cfg, ["Files"], "out_filename")
+        out_file_uri = os.path.join(path, name)
+    return out_file_uri
+
+def get_seriesstats(cf,ds):
+    # open an Excel file for the flag statistics
+    out_filename = get_outfilenamefromcf(cf)
+    xl_filename = out_filename.replace(".nc", "_FlagStats.xls")
+    file_name = os.path.split(xl_filename)
+    logger.info(" Writing flag stats to " + file_name[1])
+    xlFile = xlwt.Workbook()
+    xlFlagSheet = xlFile.add_sheet("Flag")
+    # get the flag statistics
+    bins = numpy.arange(-0.5, 23.5)
+    xlRow = 5
+    xlCol = 1
+    for Value in bins[:len(bins)-1]:
+        xlFlagSheet.write(xlRow, xlCol, int(Value+0.5))
+        xlCol = xlCol + 1
+    xlRow = xlRow + 1
+    xlCol = 0
+    dsVarNames = sorted(ds.root["Variables"].keys())
+    for ThisOne in dsVarNames:
+        var = pfp_utils.GetVariable(ds, ThisOne)
+        hist, bin_edges = numpy.histogram(var["Flag"], bins=bins)
+        xlFlagSheet.write(xlRow, xlCol, ThisOne)
+        xlCol = xlCol + 1
+        for Value in hist:
+            xlFlagSheet.write(xlRow, xlCol, float(Value))
+            xlCol = xlCol + 1
+        xlCol = 0
+        xlRow = xlRow + 1
+    xlFile.save(xl_filename)
+
+def load_controlfile(path='.', title='Choose a control file'):
+    """
+    Purpose:
+     Returns a control file object.
+    Usage:
+     cf = pfp_io.load_controlfile([path=<some_path_to_a_controlfile>],[title=<some title>])
+          where path [optional] is the path to a subdirectory
+                title [optional] is a title for the file open dialog
+                cf is a control file object
+    Author: PRI
+    Date: Back in the day
+    """
+    name = get_filename_dialog(file_path=path, title=title, ext="*.*")
+    cf = get_controlfilecontents(name)
+    return cf
+
+def MergeDataFrames(dfs, l1_info):
+    """
+    Purpose:
+     Merge several data frames into a single data frame.
+     pfp_io.ReadExcelWorkbook() returns one pandas data frame per worksheet in the
+     workbook.  This routine combines these data frames into a single data frame
+     that spans all of the times on the worksheets.
+    Usage:
+     df = pfp_io.MergeDataFrames(dfs, l1_info)
+     where dfs is a dictionary of pandas data frames
+           l1_info is the information dictionary created from the L1 control file
+           df is a single pandas data frame containing all data from the data frames
+              in dfs.
+    Side effects:
+     Returns a pandas data frame.
+    Author: PRI
+    DaMergeDataFrameste: Back in the day
+    """
+    # get a list of data frame names
+    df_names = list(dfs)
+    # merge data frames
+    if len(df_names) > 1:
+        msg = " Merging into a single data frame"
+        logger.info(msg)
+        # get the earliest start and latest end time
+        start = min(dfs[df_names[0]].index.values)
+        end = max(dfs[df_names[0]].index.values)
+        for df_name in df_names[1:]:
+            start = min([min(dfs[df_name].index.values), start])
+            end = max([max(dfs[df_name].index.values), end])
+        # get the timestep as a string pandas will recognise
+        ts = str(int(l1_info["read_excel"]["Global"]["time_step"])) + "T"
+        # create a pandas datetime range
+        dt = pandas.date_range(start, end, freq=ts)
+        # create an empty data frame
+        df = pandas.DataFrame({'DateTime': dt})
+        # set the datetime as the index
+        df = df.set_index("DateTime")
+        # list of data frames
+        frames = [df] + [dfs[s] for s in sorted(list(dfs.keys()))]
+        # merge the data frames on columns (axis=1)
+        df = pandas.concat(frames, axis=1)
+    else:
+        df = dfs[df_names[0]]
+    return df
+
+def MergeDataStructures(ds_dict, l1_info):
+    """
+    Purpose:
+     Merge multiple data structures into a single data structure.
+     Merging is done on the time axis as follows:
+      1) find the earliest start time
+      2) find the latest end time
+      3) construct a datetime series between the earliest start datetime
+         and the latest end datetime at the time step interval
+      4) create the datetime series in the merged data structure
+      5) insert the data from each individual data structure into
+         the merged data structure by matching the datetimes
+    Usage:
+    Side effects:
+     Returns a new data structure with the contents of the individual
+     data structures passed in as ds_dict.
+    Author: PRI
+    Date: February 2020
+    """
+    msg = " Merging " + str(list(ds_dict.keys()))
+    logger.info(msg)
+    l1ire = l1_info["read_excel"]
+    # data structure to hold all data
+    ds = DataStructure()
+    ds.root["Attributes"] = copy.deepcopy(l1ire["Global"])
+    # get the earliest start datetime and the latest datetime
+    start = []
+    end = []
+    for item in list(ds_dict.keys()):
+        start.append(ds_dict[item].root["Variables"]["DateTime"]["Data"][0])
+        end.append(ds_dict[item].root["Variables"]["DateTime"]["Data"][-1])
+    start = min(start)
+    end = max(end)
+    # put the datetime into the data structure
+    ts = int(float(ds.root["Attributes"]["time_step"]))
+    dts = datetime.timedelta(minutes=ts)
+    # generate an aray of datetime from start to end with spacing of ts
+    dt = numpy.array([d for d in pfp_utils.perdelta(start, end, dts)])
+    nrecs = len(dt)
+    var = pfp_utils.CreateEmptyVariable("DateTime", nrecs)
+    var["Label"] = "DateTime"
+    var["Data"] = dt
+    var["Flag"] = numpy.zeros(len(var["Data"]), dtype=numpy.int32)
+    var["Attr"] = {"long_name": "Datetime in local timezone",
+                   "cf_role": "timeseries_id",
+                   "units": "days since 1899-12-31 00:00:00"}
+    pfp_utils.CreateVariable(ds, var)
+    # update the global attributes
+    ds.root["Attributes"]["time_coverage_start"] = str(dt[0])
+    ds.root["Attributes"]["time_coverage_end"] = str(dt[-1])
+    ds.root["Attributes"]["nc_nrecs"] = len(dt)
+    # put the data into the data structure
+    dt1 = pfp_utils.GetVariable(ds, "DateTime")
+    for item in list(ds_dict.keys()):
+        #print item
+        # get the datetime for this worksheet
+        dtn = pfp_utils.GetVariable(ds_dict[item], "DateTime")
+        # remove duplicate timestamps
+        dtn_unique, index_unique = numpy.unique(dtn["Data"], return_index=True)
+        # restore the original order of the unique timestamps
+        dtn_sorted = dtn_unique[numpy.argsort(index_unique)]
+        # check to see if there were duplicates
+        if len(dtn_sorted) < len(dtn["Data"]):
+            n = len(dtn["Data"]) - len(dtn_sorted)
+            msg = str(n) + " duplicate time stamps were removed for sheet " + item
+            logger.warning(msg)
+        # get the indices where the timestamps match
+        idxa, idxb = pfp_utils.FindMatchingIndices(dt1["Data"], dtn_sorted)
+        # check that all datetimes in ds_dict[item] were found in ds
+        if len(idxa) != len(dtn_sorted):
+            no_match = 100*(len(dtn_sorted) - len(idxa))//len(dtn_sorted)
+            msg = str(no_match) + "% of time stamps for " + item + " do not match"
+            logger.warning(msg)
+        labels = list(ds_dict[item].root["Variables"].keys())
+        if "DateTime" in labels:
+            labels.remove("DateTime")
+        for label in labels:
+            var1 = pfp_utils.CreateEmptyVariable(label, nrecs)
+            varn = pfp_utils.GetVariable(ds_dict[item], label)
+            var1["Data"][idxa] = varn["Data"][idxb]
+            var1["Flag"][idxa] = varn["Flag"][idxb]
+            var1["Attr"] = varn["Attr"]
+            pfp_utils.CreateVariable(ds, var1)
+    return ds
+
+def NetCDFConcatenate(info):
+    """
+    Purpose:
+     Concatenate multiple single year files in a single, multiple year file.
+    Usage:
+     pfp_io.NetCDFConcatenate(info)
+    Called by:
+     pfp_top_level.do_file_concatenate()
+    Calls:
+     pfp_io.netcdf_concatenate_read_input_files(info)
+     pfp_utils.GetVariable()
+     pfp_io.netcdf_concatenate_create_ds_out(data, dt_out, chrono_files, labels)
+    Side effects:
+    Author: PRI
+    Date: November 2019
+    """
+    inc = info["NetCDFConcatenate"]
+    # read the input files (data is an OrderedDict)
+    data = netcdf_concatenate_read_input_files(info)
+    # get the file names in data
+    file_names = list(data.keys())
+    # get the earliest start time, the latest end time and a list of unique variable names
+    for file_name in file_names:
+        # get the start and end times
+        dt = pfp_utils.GetVariable(data[file_name], "DateTime")
+        inc["time_coverage_start"].append(dt["Data"][0])
+        inc["time_coverage_end"].append(dt["Data"][-1])
+        inc["labels"] = inc["labels"] + list(data[file_name].root["Variables"].keys())
+    # get a list of unique variable names and remove unwanted labels
+    inc["labels"] = list(set(inc["labels"]))
+    # get a list of files with start times in chronological order
+    inc["chrono_files"] = [f for d, f in sorted(zip(inc["time_coverage_start"], inc["in_file_names"]))]
+    # remove depreacted variables
+    netcdf_concatenate_remove_depreacted(info)
+    # check units for each variable are consistent across all files to be concatenated
+    netcdf_concatenate_check_units_standard_name(data, info)
+    # create the output data structure from the input files
+    ds_out = netcdf_concatenate_create_ds_out(data, info)
+    # truncate the start and the end of the output data structure
+    ds_out = netcdf_concatenate_truncate(ds_out, info)
+    # get the maximum gap length (in hours) from the control file
+    pfp_ts.InterpolateOverMissing(ds_out, inc["labels"], max_length_hours=inc["MaxGapInterpolate"],
+                                  int_type="Akima")
+    # make sure we have all of the humidities
+    pfp_ts.CalculateHumidities(ds_out)
+    # and make sure we have all of the meteorological variables
+    pfp_ts.CalculateMeteorologicalVariables(ds_out, info)
+    # check units of Fc and convert if necessary
+    Fc_list = ["Fco2", "Fco2_single", "Fco2_profile", "Fco2_storage"]
+    pfp_utils.CheckUnits(ds_out, Fc_list, "umol/m^2/s", convert_units=True)
+    # check missing data and QC flags are consistent
+    pfp_utils.CheckQCFlags(ds_out)
+    # update the coverage statistics
+    pfp_utils.get_coverage_individual(ds_out)
+    pfp_utils.get_coverage_groups(ds_out)
+    # remove intermediate series
+    pfp_ts.RemoveIntermediateSeries(ds_out, info)
+    # keep only a subset of variables
+    netcdf_concatenate_keep_subset(ds_out, info)
+    # rename if output file is the same as one of the input files
+    netcdf_concatenate_rename_output(data, inc["out_file_name"])
+    logger.info(" Writing data to " + os.path.split(inc["out_file_name"])[1])
+    # write the concatenated data structure to file
+    NetCDFWrite(inc["out_file_name"], ds_out, ndims=inc["NumberOfDimensions"])
+    return
+
+def NetCDFRead(nc_file_uri, checktimestep=True, fixtimestepmethod="round", update=False):
+    """
+    Purpose:
+     Wrapper for the pfp_io.nc_read_series() routine so we have a nice name
+     to use.  Over time, pfp_io.nc_read_series() will be rewritten and
+     eventualy deprecated.
+    Usage:
+     ds = pfp_io.NetCDFRead(nc_file_uri)
+     where nc_file_uri is a netCDF file name or URL pointing to a netCDF file
+           ds is a PFP data structure
+    Author: PRI
+    Date: June 2021
+    """
+    if not os.path.isfile(nc_file_uri):
+        msg = nc_file_uri + " not found"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    # file probably exists, so let's read it
+    nc_file = netCDF4.Dataset(nc_file_uri, "r")
+    if len(nc_file.groups.keys()) == 0:
+        ds = nc_read_series(nc_file,
+                            checktimestep=checktimestep,
+                            fixtimestepmethod=fixtimestepmethod)
+    else:
+        ds = nc_read_groups(nc_file)
+    if update:
+        ds = ds_update(ds)
+    return ds
+
+def NetCDFWrite(nc_file_path, ds, nc_type='NETCDF4', outputlist=None, ndims=3):
+    """
+    Purpose:
+     Wrapper for the pfp_io.nc_write_series() routine so we have a nice name
+     to use.  Over time, pfp_io.nc_write_series() will be rewritten and
+     eventualy deprecated.
+    Usage:
+     pfp_io.NetCDFWrite(nc_file_uri, ds)
+     where nc_file_uri is a netCDF file name or URL pointing to a netCDF file
+           ds is a PFP data structure
+    Author: PRI
+    Date: June 2021
+    """
+    file_name = os.path.split(nc_file_path)
+    msg = " Writing netCDF file " + file_name[1]
+    logger.info(msg)
+    try:
+        nc_file = netCDF4.Dataset(nc_file_path, "w", format=nc_type)
+        groups = list(vars(ds))
+        if "info" in groups:
+            groups.remove("info")
+        if len(groups) == 1:
+            # write the global attributes to the netCDF file
+            nc_write_globalattributes(nc_file, ds)
+            nc_write_series(nc_file, ds, outputlist=None, ndims=3)
+        elif len(groups) > 1:
+            # write the global attributes to the netCDF file
+            nc_write_globalattributes(nc_file, ds)
+            for group in groups:
+                dsg = getattr(ds, group)
+                if len(dsg["Variables"]) == 0:
+                    continue
+                nc_group = nc_file.createGroup(group)
+                nc_write_group(nc_group, ds, group)
+        nc_file.close()
+    except Exception:
+        msg = " Unable to write netCDF file " + file_name[1]
+        logger.error(msg)
+        error_message = traceback.format_exc()
+        logger.error(error_message)
+        nc_file.close()
+        return
+    return
+
+def netcdf_concatenate_rename_output(data, out_file_name):
+    """
+    Purpose:
+     Check to see if the output name is the same as 1 of the input file name
+     and if so, rename the input file to prevent overwriting.
+    Usage:
+    Side effects:
+     An input file with the same name as the output file will be renamed to
+     include the start and end date in the file name.
+    Author: PRI
+    Date: July 2021
+    """
+    file_names = list(data.keys())
+    if out_file_name in file_names:
+        ds = data[out_file_name]
+        start = ds.root["Variables"]["DateTime"]["Data"][0].strftime("%Y%m%d")
+        end = ds.root["Variables"]["DateTime"]["Data"][-1].strftime("%Y%m%d")
+        rename_part = "_" + start + "_" + end + ".nc"
+        output_file_rename = out_file_name.replace(".nc", rename_part)
+        msg = " Renaming " + os.path.split(out_file_name)[1] + " to "
+        msg += os.path.split(output_file_rename)[1]
+        logger.info(msg)
+        os.rename(out_file_name, output_file_rename)
+    return
+
+def netcdf_concatenate_remove_depreacted(info):
+    inc = info["NetCDFConcatenate"]
+    items = ["xlDateTime", "DateTime", "Year", "Month", "Day",
+             "Hour", "Minute", "Second", "Hdh", "Ddd", "time"]
+    for item in items:
+        if item in inc["labels"]:
+            inc["labels"].remove(item)
+    return
+
+def netcdf_concatenate_check_units_standard_name(data, info):
+    """
+    Purpose:
+     Check the units and standard_name for each variable across all files being
+     concatenated.
+    Usage:
+    Side effects:
+     Variables that do not have consistent units or standard_name across all files
+    being concatenated are removed from the list of variables to be concatenated.
+    Author: PRI
+    Date: June 2021
+    """
+    inc = info["NetCDFConcatenate"]
+    for label in sorted(list(inc["labels"])):
+        units = []
+        standard_name = []
+        for f in inc["chrono_files"]:
+            if label not in list(data[f].root["Variables"].keys()):
+                continue
+            if "units" in list(data[f].root["Variables"][label]["Attr"].keys()):
+                u = data[f].root["Variables"][label]["Attr"]["units"]
+                units.append(u)
+            if standard_name in list(data[f].root["Variables"][label]["Attr"].keys()):
+                s = data[f].root["Variables"][label]["Attr"]["standard_name"]
+                standard_name.append(s)
+        units_set = list(set(units))
+        standard_name_set = list(set(standard_name))
+        if len(units_set) > 1:
+            msg = " " + label + " units not consistent "
+            msg += str(units_set)
+            logger.warning(msg)
+            for f in inc["chrono_files"]:
+                if label in list(data[f].root["Variables"].keys()):
+                    msg = os.path.basename(f) + ": "
+                    msg += data[f].root["Variables"][label]["Attr"]["units"]
+                else:
+                    msg = os.path.basename(f) + ": " + label + " not found"
+                logger.warning(msg)
+            msg = " Variable " + label + " not concatenated"
+            logger.warning(msg)
+            inc["labels"].remove(label)
+        if len(standard_name_set) > 1:
+            msg = " " + label + " standard_name not consistent "
+            msg += str(standard_name_set)
+            logger.warning(msg)
+            for f in inc["chrono_files"]:
+                if label in list(data[f].root["Variables"].keys()):
+                    msg = os.path.basename(f) + ": "
+                    msg += data[f].root["Variables"][label]["Attr"]["standard_name"]
+                else:
+                    msg = os.path.basename(f) + ": " + label + " not found"
+                logger.warning(msg)
+            msg = "  Variable " + label + " not concatenated"
+            logger.warning(msg)
+            inc["labels"].remove(label)
+    return
+
+def netcdf_concatenate_check_valid_range(data, info):
+    """
+    Purpose:
+     Set the valid_range variable attribute to the minimum and maximum of
+     the valid_range for the variable across all files.
+    """
+    inc = info["NetCDFConcatenate"]
+    for label in sorted(list(inc["labels"])):
+        valid_min = []
+        valid_max = []
+        for f in inc["chrono_files"]:
+            if label not in list(data[f].root["Variables"].keys()):
+                continue
+            valid_range = pfp_utils.string_to_list(data[f].root["Variables"][label]["Attr"]["valid_range"])
+            valid_min.append(valid_range[0])
+            valid_max.append(valid_range[1])
+    return
+
+def netcdf_concatenate_create_ds_out(data, info):
+    """
+    Purpose:
+     Create the concatenated data structure from individual year data structures.
+    Usage:
+     ds_out = netcdf_concatenate_create_ds_out(data, info)
+     where;
+      data is a dictionary of data structures with the netCDF file names as the keys.
+      info is the settings dictionary from pfp_compliance.ParseConcatenateControlFile()
+    Side effects:
+    Author: PRI
+    Date: November 2019
+    """
+    logger.info(" Creating the output data structure")
+    inc = info["NetCDFConcatenate"]
+    # get the time step
+    # get the file names in data
+    file_names = list(data.keys())
+    ts = int(float(data[file_names[0]].root["Attributes"]["time_step"]))
+    tsd = datetime.timedelta(minutes=ts)
+    level = data[file_names[0]].root["Attributes"]["processing_level"]
+    # get a continuous time variable
+    nsd = min(inc["time_coverage_start"])
+    xed = max(inc["time_coverage_end"])
+    dt_out = numpy.array([r for r in pfp_utils.perdelta(nsd, xed, tsd)])
+    nrecs = len(dt_out)
+    zeros = numpy.zeros(nrecs, dtype=numpy.int32)
+    # get the output data structure
+    ds_out = DataStructure()
+    ds_out.root["Attributes"]["nc_nrecs"] = nrecs
+    ds_out.root["Attributes"]["time_step"] = ts
+    ds_out.root["Attributes"]["processing_level"] = level
+    # create the DateTime variable
+    dt = {"Data": dt_out, "Flag": zeros,
+          "Attr": {"long_name": "Datetime in local timezone", "units": "None"},
+          "Label": "DateTime"}
+    pfp_utils.CreateVariable(ds_out, dt)
+    # create the netCDF time variable
+    pfp_utils.get_nctime_from_datetime(ds_out)
+    time_out = pfp_utils.GetVariable(ds_out, "time")
+    # make the empty variables
+    attr_out = {}
+    for label in inc["labels"]:
+        ds_out.root["Variables"][label] = pfp_utils.CreateEmptyVariable(label, nrecs, out_type="ndarray")
+        attr_out[label] = []
+    # now loop over the files in chronological order
+    for n, file_name in enumerate(inc["chrono_files"]):
+        # copy the global attributes
+        for gattr in data[file_name].root["Attributes"]:
+            ds_out.root["Attributes"][gattr] = data[file_name].root["Attributes"][gattr]
+        # get the time from the input file
+        time_in = pfp_utils.GetVariable(data[file_name], "time")
+        # find the indices of matching times
+        indsa, indsb = pfp_utils.FindMatchingIndices(time_out["Data"], time_in["Data"])
+        # loop over the variables
+        for label in inc["labels"]:
+            dout = ds_out.root["Variables"][label]
+            if label in list(data[file_name].root["Variables"].keys()):
+                din = data[file_name].root["Variables"][label]
+                # copy input data to output variable
+                # NOTE: using direct read from and write to the data structures here,
+                #       not recommended but 10x faster than pfp_utils.GetVariable().
+                #dout["Data"][indsa] = din["Data"][indsb]
+                #dout["Flag"][indsa] = din["Flag"][indsb]
+                # 13/3/2022 PRI only copy input data to output data when input data
+                #               is not missing
+                dout["Data"][indsa] = numpy.where(din["Data"][indsb] != c.missing_value,
+                                                  din["Data"][indsb],
+                                                  dout["Data"][indsa])
+                dout["Flag"][indsa] = numpy.where(din["Data"][indsb] != c.missing_value,
+                                                  din["Flag"][indsb],
+                                                  dout["Flag"][indsa])
+                attr_out[label].append(din["Attr"])
+    # copy the variable attributes but only if they don't already exist
+    netcdf_concatenate_variable_attributes(ds_out, attr_out, info)
+    # update the global attributes
+    ds_out.root["Attributes"]["nc_nrecs"] = nrecs
+    return ds_out
+
+def netcdf_concatenate_keep_subset(ds_out, info):
+    """
+    Purpose:
+     Delete variables from the data structure except for those specified in the
+     SeriesToKeep option.
+    Usage:
+    Author: PRI
+    Date: January 2023
+    """
+    inc = info["NetCDFConcatenate"]
+    if "SeriesToKeep" not in inc:
+        return
+    msg = " Removing variables not listed in SeriesToKeep"
+    logger.info(msg)
+    inc_labels = inc["SeriesToKeep"]
+    inc_labels.append("DateTime")
+    labels = list(ds_out.root["Variables"].keys())
+    exc_labels = [l for l in labels if l not in inc_labels]
+    for label in exc_labels:
+        pfp_utils.DeleteVariable(ds_out, label)
+    return
+
+def netcdf_concatenate_variable_attributes(ds_out, attr_out, info):
+    """
+    Purpose:
+     Update the variable attributes of the concatenated data structure with the following rules:
+      - attributes "units" and "standard_name" are checked in netcdf_concatenate_check_units()
+        and if there are any inconsistencies across file, the variable is not conatenated
+      - by definition then, the variable attribues "units" and "standard_name" have the same
+        value across all files by the time we reach here and so they are not checked
+      - attributes "height", "instrument", "long_name", "statistic_type" are concatenated
+        for each variable across all files, any inconsistencies are flagged to the user
+        by a warning message
+      - the "valid_range" attribute is separated into "valid_min" and "valid_max", the minimum
+        value of "valid_min" and the maximum value of "valid_max" are found and these are
+        then used to define a new "valid_range".
+    Usage:
+     data = netcdf_concatenate_variable_attributes(ds_out, attr_out, info)
+     where;
+      ds_out is the output data structure
+      attr_out is a dictionary of attribute values from each variable from each file
+      info is the settings dictionary returned by
+              pfp_compliance.ParseConcatenateControlFile(cf)
+    Side effects:
+    Author: PRI
+    Date: November 2019
+          June 2021 - rewrite as part of DSA compliance phase 1
+    """
+    # local pointer to the info dictionary
+    inc = info["NetCDFConcatenate"]
+    # final attributes dictionary
+    attr_final = {}
+    # variable labels to be used
+    labels = list(attr_out.keys())
+    # loop over variables and define entries in attr_final
+    for label in labels:
+        # define the dictionary
+        attr_final[label] = {}
+        # add "valid_min" and "valid_max"
+        attr_final[label]["valid_min"] = []
+        attr_final[label]["valid_max"] = []
+        # add the other attributes defined in pfp_compliance.ParseConcatenateControlFile()
+        for attr in inc["attributes"]:
+            attr_final[label][attr] = []
+    # loop over variables and append the attribute values for each variable across all
+    # files to a single list
+    for label in labels:
+        for attrs in attr_out[label]:
+            for attr in attrs:
+                if attr in inc["attributes"]:
+                    if attr == "valid_range":
+                        # "valid_range" is split into "valid_min" and "valid_max"
+                        valid_min = pfp_utils.string_to_list(attrs[attr])[0]
+                        valid_max = pfp_utils.string_to_list(attrs[attr])[1]
+                        attr_final[label]["valid_min"].append(valid_min)
+                        attr_final[label]["valid_max"].append(valid_max)
+                    else:
+                        # all other attributes are appended as is
+                        attr_final[label][attr].append(attrs[attr])
+    # loop over variables and concatenate the variable attributes
+    for label in labels:
+        # loop over the attributes defined in pfp_compliance.ParseConcatenateControlFile()
+        for attr in inc["attributes"]:
+            if attr == "valid_range":
+                # deal with "valid_range"
+                if ((len(attr_final[label]["valid_min"]) == 0) or
+                    (len(attr_final[label]["valid_max"]) == 0)):
+                    # skip if "valid_min" and "valid_max" not defined for this variable
+                    continue
+                else:
+                    # build new "valid_range" from minimum of "valid_min" and maximum
+                    # of "valid_max"
+                    valid_min = min(attr_final[label]["valid_min"])
+                    valid_max = max(attr_final[label]["valid_max"])
+                    valid_range = valid_min + "," + valid_max
+                    ds_out.root["Variables"][label]["Attr"]["valid_range"] = valid_range
+            else:
+                # get a list of unique values for this variable attribute across all files
+                attrs = list(set(attr_final[label][attr]))
+                # check if there is more than 1 value for all other attributes
+                if len(attrs) == 0:
+                    # skip if attribute not defined for this variable
+                    continue
+                elif len(attrs) > 1:
+                    # warn the user if there is more than value for this variable attribute
+                    msg = " More than 1 value for attribute '" + attr + "' found for " + label
+                    logger.warning(msg)
+                else:
+                    pass
+                # update the variable attribute in the data structure
+                ds_out.root["Variables"][label]["Attr"][attr] = ",".join(attrs)
+    return
+
+def netcdf_concatenate_read_input_files(info):
+    """
+    Purpose:
+     Read the list of input files given in info and return a dictionary
+     of data structures.
+     The files do not need to be in chronological order.
+    Usage:
+     data = netcdf_concatenate_read_input_files(info)
+     where;
+      info is the settings dictionary returned by
+              pfp_compliance.ParseConcatenateControlFile(cf)
+      data is a dictionary of data structures with the netCDF file
+              names as the keys.
+    Side effects:
+    Author: PRI
+    Date: November 2019
+    """
+    data = OrderedDict()
+    file_name = info["NetCDFConcatenate"]["in_file_names"][0]
+    data[file_name] = NetCDFRead(file_name)
+    if data[file_name].info["returncodes"]["value"] != 0:
+        return data
+    ts0 = int(float(data[file_name].root["Attributes"]["time_step"]))
+    level0 = data[file_name].root["Attributes"]["processing_level"]
+    for file_name in info["NetCDFConcatenate"]["in_file_names"][1:]:
+        ds = NetCDFRead(file_name)
+        if ds.info["returncodes"]["value"] != 0:
+            return data
+        tsn = int(float(ds.root["Attributes"]["time_step"]))
+        leveln = ds.root["Attributes"]["processing_level"]
+        if ((tsn == ts0) and (leveln == level0)):
+            data[file_name] = ds
+        else:
+            path, name = os.path.split(file_name)
+            if (tsn == ts0):
+                msg = " Time stamp wrong for " + name
+                msg += ", expected " + str(ts0) + ", got " + str(tsn)
+            elif (leveln == level0):
+                msg = " Level wrong for " + name
+                msg += ", expected " + str(level0) + ", got " + str(leveln)
+            else:
+                msg = " Unknown error concatenating " + name
+            logger.warning(msg)
+    return data
+
+def netcdf_concatenate_truncate(ds_in, info):
+    """
+    Purpose:
+     Truncate the start and end of the data structure by removiong times when
+     there is less than a specified threshold of selected data available.
+    Usage:
+     ds_out = pfp_io.netcdf_concatenate_truncate(ds, info)
+     where ds is the input data structure
+           info is the settings dictionary from pfp_compliance.ParseConcatenateControlFile()
+           ds_out is the truncated data structure
+    Author: PRI
+    Date: November 2019
+    """
+    inc = info["NetCDFConcatenate"]
+    if inc["Truncate"] != "Yes":
+        return ds_in
+    # copy the input data structure
+    ds_out = copy.deepcopy(ds_in)
+    # get the datetime
+    ldt = pfp_utils.GetVariable(ds_out, "DateTime")
+    nrecs = int(ds_out.root["Attributes"]["nc_nrecs"])
+    cidx = numpy.zeros(nrecs)
+    if inc["SeriesToCheck"][0].lower() == "all":
+        inc["SeriesToCheck"] = sorted(list(ds_out.root["Variables"].keys()))
+    for item in list(inc["SeriesToCheck"]):
+        if item not in list(ds_out.root["Variables"].keys()):
+            inc["SeriesToCheck"].remove(item)
+            continue
+        var = pfp_utils.GetVariable(ds_out, item)
+        idx = numpy.where(numpy.ma.getmaskarray(var["Data"]) == False)[0]
+        cidx[idx] = cidx[idx] + 1
+    cidx = cidx/float(len(inc["SeriesToCheck"]))
+    # find the first and last element where more than 50% data is present
+    threshold = float(inc["TruncateThreshold"])/float(100)
+    idx = numpy.where(cidx >= threshold)[0]
+    si = idx[0]
+    if si != 0:
+        msg = " Start date truncated from " + str(ldt["Data"][0]) + " to " + str(ldt["Data"][si])
+        logger.info(msg)
+    ei = idx[-1]
+    if ei != nrecs-1:
+        msg = " End date truncated from " + str(ldt["Data"][-1]) + " to " + str(ldt["Data"][ei])
+        logger.info(msg)
+    # now loop over the data series and truncate
+    for item in list(ds_out.root["Variables"].keys()):
+        ds_out.root["Variables"][item]["Data"] = ds_out.root["Variables"][item]["Data"][si:ei+1]
+        ds_out.root["Variables"][item]["Flag"] = ds_out.root["Variables"][item]["Flag"][si:ei+1]
+    # update the relevent global attributes
+    ds_out.root["Attributes"]["time_coverage_start"] = ldt["Data"][si]
+    ds_out.root["Attributes"]["time_coverage_end"] = ldt["Data"][ei]
+    ds_out.root["Attributes"]["nc_nrecs"] = len(ds_out.root["Variables"]["DateTime"]["Data"])
+    return ds_out
+
 def nc_2xls(ncfilename, outputlist=None):
     # read the netCDF file
     ds = NetCDFRead(ncfilename,checktimestep=False)
-    if ds.info["returncodes"]["value"] != 0: return
-    nRecs = int(ds.root["Attributes"]["nc_nrecs"])
-    nCols = len(list(ds.root["Variables"].keys()))
-    if outputlist!=None: nCols = len(outputlist)
-    # xlwt seems to only handle 225 columns
-    if nRecs<65535 and nCols<220:
-        # write the variables to the Excel 97/2003 file
-        xlsfilename= ncfilename.replace(".nc", ".xls")
-        if os.path.isfile(xlsfilename):
-            file_path = os.path.split(xlsfilename)
-            xlsfilename = get_output_filename_dialog(file_path=file_path[0], ext="*.xls")
-            if len(xlsfilename) == 0: return
-        xl_write_series(ds, xlsfilename, outputlist=outputlist)
+    if ds.info["returncodes"]["value"] != 0:
+        return
+    groups = [i for i in vars(ds) if i not in ["info", "root"]]
+    if len(groups) == 0:
+        nRecs = int(ds.root["Attributes"]["nc_nrecs"])
+        nCols = len(list(ds.root["Variables"].keys()))
+        if outputlist != None:
+            nCols = len(outputlist)
+        # xlwt seems to only handle 225 columns
+        if nRecs < 65535 and nCols < 220:
+            # write the variables to the Excel 97/2003 file
+            xlsfilename= ncfilename.replace(".nc", ".xls")
+            if os.path.isfile(xlsfilename):
+                file_path = os.path.split(xlsfilename)
+                xlsfilename = get_output_filename_dialog(file_path=file_path[0], ext="*.xls")
+                if len(xlsfilename) == 0:
+                    return
+            xl_write_series(ds, xlsfilename, outputlist=outputlist)
+        else:
+            # write the variables to the Excel 2010 file
+            xlsxfilename= ncfilename.replace(".nc", ".xlsx")
+            if os.path.isfile(xlsxfilename):
+                file_path = os.path.split(xlsxfilename)
+                xlsxfilename = get_output_filename_dialog(file_path=file_path[0], ext="*.xlsx")
+                if len(xlsxfilename) == 0:
+                    return
+            xlsx_write_series(ds, xlsxfilename, outputlist=outputlist)
     else:
-        # write the variables to the Excel 2010 file
-        xlsxfilename= ncfilename.replace(".nc", ".xlsx")
-        if os.path.isfile(xlsxfilename):
-            file_path = os.path.split(xlsxfilename)
-            xlsxfilename = get_output_filename_dialog(file_path=file_path[0], ext="*.xlsx")
-            if len(xlsxfilename) == 0: return
-        xlsx_write_series(ds, xlsxfilename, outputlist=outputlist)
+        xlwriter = pandas.ExcelWriter(ncfilename.replace(".nc", ".xlsx"))
+        for group in groups:
+            dsg = getattr(ds, group)
+            labels = dsg["Variables"].keys()
+            data = {}
+            for label in labels:
+                data[label] = dsg["Variables"][label]["Data"]
+            df = pandas.DataFrame.from_dict(data)
+            df.set_index("DateTime", inplace=True)
+            df.to_excel(xlwriter, sheet_name=group)
+        xlwriter.close()
+    return
+
+def nc_read_groups(nc_file):
+    """
+    Purpose:
+     Read a netCDF4 file that contains groups and return a data structure with
+     the same groups.
+    Usage:
+    Side effects:
+    Author: PRI
+    Date: July 2022
+    """
+    groups = list(nc_file.groups.keys())
+    msg = " Reading netCDF file with groups"
+    logger.info(msg)
+    # disable automatic masking of data when valid_range specified
+    nc_file.set_auto_mask(False)
+    ds = DataStructure(groups=groups)
+    ds.info["filepath"] = nc_file.filepath()
+    # now deal with the global attributes
+    gattrs = nc_file.ncattrs()
+    if len(gattrs) != 0:
+        for gattr in gattrs:
+            ds.root["Attributes"][gattr] = getattr(nc_file, gattr)
+    for grp in groups:
+        group = getattr(ds, grp)
+        labels = sorted(list(nc_file[grp].variables.keys()))
+        for item in ["latitude", "longitude"]:
+            if item in labels:
+                labels.remove(item)
+        for label in labels:
+            data, flag, attr = nc_read_var(nc_file[grp], label)
+            var = {"Label": label, "Data": data, "Flag": flag, "Attr": attr}
+            pfp_utils.CreateVariable(ds, var, group=grp)
+        # get the Python datetime from the netCDF time
+        nrecs = len(group["Variables"]["time"]["Data"])
+        dt = cftime.num2date(group["Variables"]["time"]["Data"],
+                             group["Variables"]["time"]["Attr"]["units"],
+                             only_use_cftime_datetimes=False,
+                             only_use_python_datetimes=True)
+        calendar = "gregorian"
+        if "calendar" in group["Variables"]["time"]["Attr"]:
+            calendar = group["Variables"]["time"]["Attr"]["calendar"]
+        var = {"Label": "DateTime", "Data": dt, "Flag": numpy.zeros(nrecs),
+               "Attr": {"long_name": "Datetime in local timezone", "units": "",
+                        "calendar": calendar}}
+        pfp_utils.CreateVariable(ds, var, group=grp)
+        # get the group attributes
+        gattrs = nc_file[grp].ncattrs()
+        # trap legacy L6 summary files with no group attributes
+        if len(gattrs) > 0:
+            # group attributes present
+            for gattr in gattrs:
+                group["Attributes"][gattr] = getattr(nc_file[grp], gattr)
+        else:
+            # group attributes not present so we deduce them from ncfile
+            group["Attributes"]["nc_nrecs"] = nrecs
+            if grp.lower() in ["daily", "monthly", "annual"]:
+                ts = grp.lower()
+            else:
+                ts = ds.root["Attributes"]["time_step"]
+            group["Attributes"]["time_step"] = ts
+    nc_file.close()
+    ds.info["returncodes"]["value"] = 0
+    ds.info["returncodes"]["message"] = "netCDF file read OK"
+    return ds
+
+def nc_read_series(nc_file, checktimestep=True, fixtimestepmethod="round"):
+    """
+    Purpose:
+     Reads a netCDF file and returns the meta-data and data in a DataStructure.
+     The returned data structure is an instance of pfp_io.DataStructure().
+     The data structure consists of:
+      1) ds.root["Attributes"]
+         A dictionary containing the global attributes of the netCDF file.
+      2) ds.root["Variables"]
+         A dictionary containing the variable data, meta-data and QC flag
+         Each variable dictionary in ds.root["Variables"] contains;
+         a) ds.root["Variables"][variable]["Data"]
+            A 1D numpy float64 array containing the variable data, missing
+            data value is -9999.
+         b) ds.root["Variables"][variable]["Flag"]
+            A 1D numpy int32 array containing the QC flag data for this variable.
+         c) ds.root["Variables"][variable]["Attr"]
+            A dictionary containing the variable attributes.
+    Usage:
+     nc_name = pfp_io.get_filename_dialog(path="../Sites/Whroo/Data/Processed/")
+     ds = pfp_io.nc_read_series(nc_name)
+     where nc_name is the full name of the netCDF file to be read
+           ds is the returned data structure
+    Side effects:
+     This routine checks the time step of the data read from the netCDF file
+     against the value of the global attribute "time_step", see pfp_utils.CheckTimeStep.
+     If a problem is found with the time step (duplicate records, non-integral
+     time steps or gaps) then pfp_utils.FixTimeStep is called to repair the time step.
+     Fixing non-integral timne steps requires some user input.  The options are to
+     quit ([Q]), interpolate ([I], not implemented yet) or round ([R]).  Quitting
+     causes the script to exit and return to the command prompt.  Interpolation
+     is not implemented yet but will interpolate the data from the original time
+     step to a regular time step.  Rounding will round any non-itegral time steps
+     to the nearest time step.
+    Author: PRI
+    Date: Back in the day
+    """
+    logger.info(" Reading netCDF file " + os.path.basename(nc_file.filepath()))
+    # disable automatic masking of data when valid_range specified
+    nc_file.set_auto_mask(False)
+    # get an instance of a PFP data structure
+    ds = DataStructure()
+    ds.info["filepath"] = nc_file.filepath()
+    # now deal with the global attributes
+    gattrlist = nc_file.ncattrs()
+    if len(gattrlist) != 0:
+        for gattr in gattrlist:
+            ds.root["Attributes"][gattr] = getattr(nc_file, gattr)
+    if "processing_level" not in ds.root["Attributes"]:
+        if "nc_level" in ds.root["Attributes"]:
+            ds.root["Attributes"]["processing_level"] = ds.root["Attributes"]["nc_level"]
+        else:
+            msg = "  No processing level in global attributes, set to unknown"
+            logger.warning(msg)
+            ds.root["Attributes"]["processing_level"] = "unknown"
+    # get a list of the variables in the netCDF file (not their QC flags)
+    varlist = [x for x in list(nc_file.variables.keys()) if "_QCFlag" not in x]
+    for ThisOne in varlist:
+        # skip variables that do not have time as a dimension
+        dimlist = [x.lower() for x in nc_file.variables[ThisOne].dimensions]
+        if "time" not in dimlist: continue
+        # create the series in the data structure
+        ds.root["Variables"][str(ThisOne)] = {}
+        # get the data and the QC flag
+        data, flag, attr = nc_read_var(nc_file, ThisOne)
+        ds.root["Variables"][ThisOne]["Data"] = data
+        ds.root["Variables"][ThisOne]["Flag"] = flag
+        ds.root["Variables"][ThisOne]["Attr"] = attr
+    # get a series of Python datetime objects
+    labels = list(ds.root["Variables"].keys())
+    if "time" in labels:
+        pfp_utils.get_datetime_from_nctime(ds)
+    elif (("Year" in labels) and ("Month" in labels) and ("Day" in labels) and
+          ("Hour" in labels) and ("Minute" in labels) and ("Second" in labels)):
+        pfp_utils.get_datetime_from_ymdhms(ds)
+    elif "xlDateTime" in labels:
+        pfp_utils.get_datetime_from_xldatetime(ds)
+    else:
+        msg = "Unable to find any datetime data in netCDF file"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    nc_file.close()
+    # check to see if we have the "nc_nrecs" global attribute
+    if "nc_nrecs" not in list(ds.root["Attributes"].keys()):
+        ds.root["Attributes"]["nc_nrecs"] = str(len(ds.root["Variables"]["DateTime"]["Data"]))
+    # round the Python datetime to the nearest second
+    pfp_utils.round_datetime(ds, mode="nearest_second")
+    # check the time step and fix it required
+    if checktimestep:
+        if pfp_utils.CheckTimeStep(ds):
+            pfp_utils.FixTimeStep(ds, fixtimestepmethod=fixtimestepmethod)
+    # tell the user when the data starts and ends
+    ldt = ds.root["Variables"]["DateTime"]["Data"]
+    msg = " Got data from " + ldt[0].strftime("%Y-%m-%d %H:%M:%S")
+    msg += " to " + ldt[-1].strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(msg)
+    ds.info["returncodes"]["value"] = 0
+    ds.info["returncodes"]["message"] = "netCDF file read OK"
+    return ds
+
+def nc_read_var(ncFile,ThisOne):
+    """ Reads a variable from a netCDF file and returns the data, the QC flag and the variable
+        attribute dictionary.
+    """
+    # check the number of dimensions
+    nDims = len(ncFile.variables[ThisOne].shape)
+    if nDims not in [1,3,4]:
+        msg = "nc_read_var: unrecognised number of dimensions ("+str(nDims)
+        msg = msg+") for netCDF variable "+ ThisOne
+        raise Exception(msg)
+    if nDims==1:
+        # single dimension
+        data = ncFile.variables[ThisOne][:]
+        # netCDF4 returns a masked array if the "missing_variable" attribute has been set
+        # for the variable, here we trap this and force the array in ds.root["Variables"] to be ndarray
+        if numpy.ma.isMA(data): data,dummy = pfp_utils.MAtoSeries(data)
+        # check for a QC flag
+        if ThisOne+'_QCFlag' in list(ncFile.variables.keys()):
+            # load it from the netCDF file
+            flag = ncFile.variables[ThisOne+'_QCFlag'][:]
+        else:
+            # create an empty flag series if it does not exist
+            nRecs = numpy.size(data)
+            flag = numpy.zeros(nRecs,dtype=numpy.int32)
+        # trap non-finite values and set them to c.missing_value
+        if not numpy.isfinite(data).all():
+            idx = numpy.where(numpy.isfinite(data) == False)[0]
+            data[idx] = numpy.float64(c.missing_value)
+            idx = numpy.where((numpy.isfinite(data) == False) & (flag == 0))[0]
+            flag[idx] = numpy.int32(8)
+    elif nDims==3:
+        # 3 dimensions
+        data = ncFile.variables[ThisOne][:,0,0]
+        # netCDF4 returns a masked array if the "missing_variable" attribute has been set
+        # for the variable, here we trap this and force the array in ds.root["Variables"] to be ndarray
+        # may not be needed after adding ncFile.set_auto_mask(False) in nc_read_series().
+        if numpy.ma.isMA(data): data,dummy = pfp_utils.MAtoSeries(data)
+        # check for a QC flag
+        if ThisOne+'_QCFlag' in list(ncFile.variables.keys()):
+            # load it from the netCDF file
+            flag = ncFile.variables[ThisOne+'_QCFlag'][:,0,0]
+        else:
+            # create an empty flag series if it does not exist
+            nRecs = numpy.size(data)
+            flag = numpy.zeros(nRecs,dtype=numpy.int32)
+        # trap non-finite values and set them to c.missing_value
+        if not numpy.isfinite(data).all():
+            idx = numpy.where(numpy.isfinite(data) == False)[0]
+            data[idx] = numpy.float64(c.missing_value)
+            idx = numpy.where((numpy.isfinite(data) == False) & (flag == 0))[0]
+            flag[idx] = numpy.int32(8)
+    elif nDims==4:
+        # 4 dimensions, this is specific to ERA5T data where 0 is ERA5 and 1 is ERA5T data
+        data0 = ncFile.variables[ThisOne][:,0,0,0]
+        data1 = ncFile.variables[ThisOne][:,1,0,0]
+        data = numpy.ma.where(data0.mask == False,data0,data1)
+        # netCDF4 returns a masked array if the "missing_variable" attribute has been set
+        # for the variable, here we trap this and force the array in ds.root["Variables"] to be ndarray
+        # may not be needed after adding ncFile.set_auto_mask(False) in nc_read_series().
+        if numpy.ma.isMA(data): data,dummy = pfp_utils.MAtoSeries(data)
+        # check for a QC flag
+        if ThisOne+'_QCFlag' in list(ncFile.variables.keys()):
+            # load it from the netCDF file
+            flag = ncFile.variables[ThisOne+'_QCFlag'][:,0,0]
+        else:
+            # create an empty flag series if it does not exist
+            nRecs = numpy.size(data)
+            flag = numpy.zeros(nRecs,dtype=numpy.int32)
+        # trap non-finite values and set them to c.missing_value
+        if not numpy.isfinite(data).all():
+            idx = numpy.where(numpy.isfinite(data) == False)[0]
+            data[idx] = numpy.float64(c.missing_value)
+            idx = numpy.where((numpy.isfinite(data) == False) & (flag == 0))[0]
+            flag[idx] = numpy.int32(8)
+    # force float32 to float64
+    if data.dtype=="float32": data = data.astype(numpy.float64)
+    # check for Year, Month etc as int64, force to int32 if required
+    if ThisOne in ["Year","Month","Day","Hour","Minute","Second"]:
+        if data.dtype=="int64": data = data.astype(numpy.int32)
+    # get the variable attributes
+    vattrlist = ncFile.variables[ThisOne].ncattrs()
+    attr = {}
+    if len(vattrlist) != 0:
+        for vattr in vattrlist:
+            va = getattr(ncFile.variables[ThisOne], vattr)
+            if isinstance(va, numpy.ndarray):
+                attr[vattr] = ",".join([str(i) for i in va])
+            else:
+                attr[vattr] = va
+    return data, flag, attr
+
+def nc_split_run(split_gui):
+    infilename = split_gui.info["input_file_path"]
+    outfilename = split_gui.info["output_file_path"]
+    startdate = split_gui.info["startdate"]
+    enddate = split_gui.info["enddate"]
+    msg = " Splitting " + os.path.basename(infilename) + " between "
+    msg = msg + startdate + " and " + enddate
+    logger.info(msg)
+    msg = " Output to " + os.path.basename(outfilename)
+    logger.info(msg)
+    # read the input file into the input data structure
+    #ds_in = split_gui.ds
+    ds_in = NetCDFRead(infilename)
+    if ds_in.info["returncodes"]["value"] != 0: return
+    ts = int(float(ds_in.root["Attributes"]["time_step"]))
+    ldt_in = ds_in.root["Variables"]["DateTime"]["Data"]
+    ldt_in_flag = ds_in.root["Variables"]["DateTime"]["Flag"]
+    # create the output data structure
+    ds_out = DataStructure()
+    # copy the global attributes
+    for item in list(ds_in.root["Attributes"].keys()):
+        ds_out.root["Attributes"][item] = ds_in.root["Attributes"][item]
+    # get the indices of the start and end datetimes
+    si = pfp_utils.GetDateIndex(ldt_in,startdate,ts=ts,default=0,match="exact")
+    ei = pfp_utils.GetDateIndex(ldt_in,enddate,ts=ts,default=len(ldt_in),match="exact")
+    # get a list of the series in ds_in
+    series_list = [item for item in list(ds_in.root["Variables"].keys()) if "_QCFlag" not in item]
+    # remove the Python datetime series
+    for item in ["DateTime","DateTime_UTC"]:
+        if item in series_list: series_list.remove(item)
+    # loop over the series
+    for item in series_list:
+        var = pfp_utils.GetVariable(ds_in, item, start=si, end=ei)
+        pfp_utils.CreateVariable(ds_out, var)
+    # deal with the Python datetime series
+    ldt_out = ldt_in[si:ei+1]
+    ldt_out_flag = ldt_in_flag[si:ei+1]
+    ds_out.root["Variables"]["DateTime"] = {}
+    ds_out.root["Variables"]["DateTime"]["Data"] = ldt_out
+    ds_out.root["Variables"]["DateTime"]["Flag"] = ldt_out_flag
+    ds_out.root["Variables"]["DateTime"]["Attr"]= ds_in.root["Variables"]["DateTime"]["Attr"]
+    # update the number of records global attribute
+    ds_out.root["Attributes"]["nc_nrecs"] = len(ldt_out)
+    # update the start and end datetime global attribute
+    ds_out.root["Attributes"]["time_coverage_start"] = str(ldt_out[0])
+    ds_out.root["Attributes"]["time_coverage_end"] = str(ldt_out[-1])
+    # write the output data structure to a netCDF file
+    NetCDFWrite(outfilename, ds_out)
+    msg = " Finished splitting " + os.path.basename(infilename)
+    logger.info(msg)
+
+def nc_open_write(ncFullName, nctype='NETCDF4', mode="verbose"):
+    """
+    Purpose:
+     Opens a netCDF file object for writing.  The opened netCDF file
+     object is then passed as an argument to pfp_io.nc_write_series, where
+     the actual writing of data occurs.
+    Usage:
+     nc_name = '../Sites/Whroo/Data/Processed/all/Whroo_L4.nc'
+     nc_file = pfp_io.nc_open_write(nc_name)
+     where nc_name is the ful file name of the netCDF to be written
+           nc_file is the returned netCDF file object
+    Author: PRI
+    Date: Back in the day
+    """
+    file_name = os.path.split(ncFullName)
+    if mode != "quiet":
+        logger.info(" Opening netCDF file " + file_name[1])
+    try:
+        ncFile = netCDF4.Dataset(ncFullName, "w", format=nctype)
+    except:
+        logger.error(" Unable to open netCDF file " + file_name[1] + " for writing")
+        ncFile = None
+    return ncFile
+
+def nc_write_globalattributes(nc_file, ds, flag_defs=True):
+    """
+    Purpose:
+    Usage:
+    Author: PRI
+    Date: Back in the day
+    """
+    # check to see if we have a DataStructure or a dictionary
+    if isinstance(ds, DataStructure):
+        # get a local dictionary from a DataStructure
+        lds = {"globalattributes": ds.root["Attributes"],
+               "variables": ds.root["Variables"]}
+    elif isinstance(ds, dict):
+        # check to see if 'globalattributes' and 'variables' in dictionary
+        if (("globalattributes" in ds) and ("variables" in ds)):
+            lds = {"globalattributes": ds["globalattributes"],
+                   "variables": ds["variables"]}
+        else:
+            msg = "Dict doesn't contain expected contents "
+            msg += "'globalattributes' or 'variables'"
+            logger.error(msg)
+            raise RuntimeError(msg)
+    else:
+        msg = "Expected DataStructure or dictionary for 'ds'"
+        msg += ", got " + type(ds)
+        logger.error(msg)
+        raise RuntimeError(msg)
+    lds["globalattributes"]["pyfluxpro_version"] = str(cfg.version_name)+' '+str(cfg.version_number)
+    if "DateTime" in lds["variables"]:
+        ldt = lds["variables"]["DateTime"]["Data"]
+        lds["globalattributes"]["time_coverage_start"] = str(ldt[0])
+        lds["globalattributes"]["time_coverage_end"] = str(ldt[-1])
+    t = time.localtime()
+    lds["globalattributes"]["date_created"] = str(datetime.datetime(t[0],t[1],t[2],t[3],t[4],t[5]))
+    gattrs = sorted(list(lds["globalattributes"].keys()))
+    flags = []
+    attrs = []
+    for item in gattrs:
+        if "Flag" in item:
+            flags.append(item)
+        else:
+            attrs.append(item)
+    for item in attrs:
+        if isinstance(lds["globalattributes"][item], str):
+            attr = lds["globalattributes"][item].encode('ascii', 'ignore')
+        else:
+            attr = str(lds["globalattributes"][item])
+        setattr(nc_file, item, attr)
+    if flag_defs:
+        for item in flags:
+            if isinstance(lds["globalattributes"][item], str):
+                attr = lds["globalattributes"][item].encode('ascii', 'ignore')
+            else:
+                attr = str(lds["globalattributes"][item])
+            setattr(nc_file, item, attr)
+    return
+
+def nc_write_group(nc_obj, ds, group):
+    """
+    Purpose:
+     Write the L6 summary statistics (daily, monthly, annual and cumulative)
+     to a single netCDF file with different groups for each time period.
+    Usage:
+    Author: PRI
+    Date: January 2018
+    """
+    if isinstance(ds, DataStructure):
+        if hasattr(ds, "root"):
+            dsr = getattr(ds, "root")
+        else:
+            msg = " DataStructure object has no 'root' attribute"
+            logger.error(msg)
+            raise RuntimeError(msg)
+        if hasattr(ds, group):
+            dsg = getattr(ds, group)
+        else:
+            msg = " DataStructure object has no " + group + " attribute"
+            logger.error(msg)
+            raise RuntimeError(msg)
+    else:
+        msg = " Unexpected object (" + type(ds) + ")"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    # sanity check
+    if "Attributes" not in list(dsr.keys()):
+        msg = " Data structure has no global 'Attributes'"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    if "Attributes" not in list(dsg.keys()):
+        msg = " Data structure group " + group + " has no 'Attributes'"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    if "Variables" not in list(dsg.keys()):
+        msg = " Data structure group " + group + " has no 'Variables'"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    # write the group attributes
+    gattrs = sorted(list(dsg["Attributes"].keys()))
+    for gattr in gattrs:
+        setattr(nc_obj, gattr, dsg["Attributes"][gattr])
+    # write the group variables
+    gvars = sorted(list(dsg["Variables"].keys()))
+    if len(gvars) == 0:
+        return
+    dt = dsg["Variables"]["DateTime"]["Data"]
+    nrecs = len(dt)
+    # and give it dimensions of time, latitude and longitude
+    nc_obj.createDimension("time", nrecs)
+    nc_obj.createDimension("latitude", 1)
+    nc_obj.createDimension("longitude", 1)
+    dims = ("time", "latitude", "longitude")
+    # write the time variable to the netCDF object
+    nc_time_units = "days since 1800-01-01 00:00:00.0"
+    nc_time = pfp_utils.get_nctime_from_datetime_data(dt, nc_time_units=nc_time_units)
+    nc_var = nc_obj.createVariable("time", "d", ("time",))
+    nc_var[:] = nc_time
+    nc_var.setncattr("long_name", "time")
+    nc_var.setncattr("standard_name", "time")
+    nc_var.setncattr("units", nc_time_units)
+    # write the latitude and longitude variables to the group
+    nc_var = nc_obj.createVariable("latitude", "d", ("latitude",))
+    nc_var[:] = float(dsr["Attributes"]["latitude"])
+    nc_var.setncattr('long_name', 'latitude')
+    nc_var.setncattr('standard_name', 'latitude')
+    nc_var.setncattr('units', 'degrees north')
+    nc_var = nc_obj.createVariable("longitude", "d", ("longitude",))
+    nc_var[:] = float(dsr["Attributes"]["longitude"])
+    nc_var.setncattr('long_name', 'longitude')
+    nc_var.setncattr('standard_name', 'longitude')
+    nc_var.setncattr('units', 'degrees east')
+    # get a list of variables to write to the netCDF file
+    labels = sorted([l for l in list(dsg["Variables"].keys()) if l not in ["DateTime", "time"]])
+    # write the variables to the netCDF file object
+    for label in labels:
+        nc_var = nc_obj.createVariable(label, "d", dims)
+        nc_var[:, 0, 0] = dsg["Variables"][label]["Data"].tolist()
+        for attr_key in dsg["Variables"][label]["Attr"]:
+            if attr_key not in ["format"]:
+                attr_value = dsg["Variables"][label]["Attr"][attr_key]
+                nc_var.setncattr(attr_key, attr_value)
+    return
+
+def nc_write_series(ncFile, ds, outputlist=None, ndims=3):
+    """
+    Purpose:
+     Write the contents of a data structure to a netCDF file.
+    Usage:
+     nc_file = pfp_io.nc_open_write(nc_name)
+     pfp_io.nc_write_series(nc_file,ds)
+     where nc_file is a netCDF file object returned by pfp_io.nc_open_write
+           ds is a data structure
+    Author: PRI
+    Date: Back in the day
+    """
+    # we specify the size of the Time dimension because netCDF4 is slow to write files
+    # when the Time dimension is unlimited
+    nRecs = int(ds.root["Attributes"]['nc_nrecs'])
+    ncFile.createDimension("time",nRecs)
+    if ndims==3:
+        ncFile.createDimension("latitude",1)
+        ncFile.createDimension("longitude",1)
+        dims = ("time","latitude","longitude")
+    else:
+        dims = ("time",)
+    if outputlist is None:
+        outputlist = list(ds.root["Variables"].keys())
+    else:
+        for ThisOne in outputlist:
+            if ThisOne not in list(ds.root["Variables"].keys()):
+                logger.warning(" Requested series "+ThisOne+" not found in data structure")
+                outputlist.remove(ThisOne)
+        if len(outputlist)==0: outputlist = list(ds.root["Variables"].keys())
+    # can't write an array of Python datetime objects to a netCDF file
+    # actually, this could be written as characters
+    for ThisOne in ["DateTime","DateTime_UTC"]:
+        if ThisOne in outputlist: outputlist.remove(ThisOne)
+    # Update the time variable from the Python datetime
+    pfp_utils.get_nctime_from_datetime(ds)
+    ldt = pfp_utils.GetVariable(ds, "time")
+    ncVar = ncFile.createVariable("time","d",("time",))
+    ncVar[:] = numpy.ma.getdata(ldt["Data"])
+    for item in ldt["Attr"]:
+        setattr(ncVar, item, ldt["Attr"][item])
+    if "time" in outputlist: outputlist.remove("time")
+    # now write the latitude and longitude variables
+    if "latitude" not in ds.root["Attributes"]: ndims = 1
+    if "longitude" not in ds.root["Attributes"]: ndims = 1
+    if ndims==3:
+        if "latitude" not in outputlist:
+            ncVar = ncFile.createVariable("latitude","d",("latitude",))
+            ncVar[:] = pfp_utils.convert_anglestring(str(ds.root["Attributes"]["latitude"]))
+            setattr(ncVar,'long_name','latitude')
+            setattr(ncVar,'standard_name','latitude')
+            setattr(ncVar,'units','degree_north')
+        if "longitude" not in outputlist:
+            ncVar = ncFile.createVariable("longitude","d",("longitude",))
+            ncVar[:] = pfp_utils.convert_anglestring(str(ds.root["Attributes"]["longitude"]))
+            setattr(ncVar,'long_name','longitude')
+            setattr(ncVar,'standard_name','longitude')
+            setattr(ncVar,'units','degree_east')
+    # now make sure the date and time series are not in outputlist
+    datetimelist = ['xlDateTime','Year','Month','Day','Hour','Minute','Second','Hdh','Ddd']
+    for ThisOne in datetimelist:
+        if ThisOne in outputlist:
+            outputlist.remove(ThisOne)
+    # write everything else to the netCDF file
+    for ThisOne in sorted(outputlist):
+        nc_write_var(ncFile,ds,ThisOne,dims)
+    # write the coordinate reference system (crs) variable
+    if "crs" not in outputlist:
+        ncVar = ncFile.createVariable("crs","i",())
+        setattr(ncVar,"grid_mapping_name","latitude_longitude")
+        setattr(ncVar,"long_name","WGS 1984 datum")
+        setattr(ncVar,"longitude_of_prime_meridian","0.0")
+        setattr(ncVar,"semi_major_axis","6378137.0")
+        setattr(ncVar,"inverse_flattening","298.257223563")
+    # write the station_name variable
+    site_name = ds.root["Attributes"]["site_name"]
+    site_name = site_name.rstrip().lstrip().replace(" ", "")
+    ncFile.createDimension("name_strlen", len(site_name))
+    ncVar = ncFile.createVariable("station_name", "c", ("name_strlen",))
+    ncVar[:] = site_name
+    setattr(ncVar, "long_name", "station name")
+    setattr(ncVar, "cf_role", "timeseries_id")
+    return
+
+def nc_write_var(ncFile, ds, ThisOne, dim):
+    """
+    Purpose:
+     Function to write data from a series in the data structure to a netCDF variable.
+    Usage:
+     nc_write_var(ncFile,ds,ThisOne,("time","latitude","longitude"))
+      where ncFile is a netCDF file object
+            ds is the data structure
+            ThisOne is the label of a series in ds
+            ("time","latitude","longitude") is the dimension tuple
+    Author: PRI
+    Date: August 2014
+    """
+    # get the data type of the series in ds
+    dt = get_ncdtype(ds.root["Variables"][ThisOne]["Data"])
+    # create the netCDF variable
+    try:
+        ncVar = ncFile.createVariable(ThisOne, dt, dim)
+    except RuntimeError:
+        msg = "Error writing variable to netCDF file: "+ThisOne
+        raise Exception(msg)
+    # different writes to the variable depending on whether it is 1D or 3D
+    if len(dim) == 1:
+        ncVar[:] = ds.root["Variables"][ThisOne]["Data"].tolist()
+    elif len(dim) == 3:
+        ncVar[:, 0, 0] = ds.root["Variables"][ThisOne]["Data"].tolist()
+    else:
+        msg = "Unrecognised dimension request for netCDF variable: "+ThisOne
+        raise RuntimeError(msg)
+    # write the attributes
+    vattrs = sorted(list(ds.root["Variables"][ThisOne]["Attr"].keys()))
+    for item in vattrs:
+        if item not in ["_FillValue", "missing_value", "valid_max", "vaild_min", "valid_range"]:
+            attr = str(ds.root["Variables"][ThisOne]["Attr"][item])
+            ncVar.setncattr(item, attr)
+    # write the valid_range attribute
+    if dt == "d":
+        if "valid_range" in ds.root["Variables"][ThisOne]["Attr"]:
+            try:
+                valid_range = [float(l) for l in ds.root["Variables"][ThisOne]["Attr"]["valid_range"].split(",")]
+                ncVar.setncattr("valid_range", valid_range)
+            except Exception:
+                msg = " Unable to write valid_range attribute for " + ThisOne
+                msg+= ", skipping ..."
+                logger.warning(msg)
+    else:
+        if "valid_range" in ds.root["Variables"][ThisOne]["Attr"]:
+            try:
+                valid_range = [int(l) for l in ds.root["Variables"][ThisOne]["Attr"]["valid_range"].split(",")]
+                ncVar.setncattr("valid_range", valid_range)
+            except Exception:
+                msg = " Unable to write valid_range attribute for " + ThisOne
+                msg+= ", skipping ..."
+                logger.warning(msg)
+    # get the data type of the QC flag
+    dt = get_ncdtype(ds.root["Variables"][ThisOne]["Flag"])
+    # create the variable
+    ncVar = ncFile.createVariable(ThisOne+"_QCFlag", dt, dim)
+    # write 1D or 3D
+    if len(dim)==1:
+        ncVar[:] = ds.root["Variables"][ThisOne]["Flag"].tolist()
+    elif len(dim)==3:
+        ncVar[:, 0, 0] = ds.root["Variables"][ThisOne]["Flag"].tolist()
+    else:
+        msg = "Unrecognised dimension request for netCDF variable: "+ThisOne
+        raise RuntimeError(msg)
+    # set the attributes
+    ncVar.setncattr("long_name", ThisOne+"QC flag")
+    ncVar.setncattr("units", "1")
     return
 
 def PadDataStructure(ds_original, pad_to="whole_years"):
@@ -864,96 +2388,6 @@ def ReadExcelWorkbook(l1_info):
             dfs.pop(key)
     return dfs
 
-def read_excel_workbook_get_timestamp(dfs, df_name, l1_info):
-    """
-    Purpose:
-     Check to see if we can get a timestamp for this worksheet.
-     The criteria for accepting a worksheet column as a timestamp are:
-      - pandas must be able to convert it to a datetime
-      - the time step must be the same as the global attribute
-        time step
-        - the time step is calculated as the mode of the differentiated
-          timestamp column
-      - if there are more than 1 columns that qualify, the first is chosen
-    Usage:
-    Side effects:
-     The worksheet is deleted from the dictionary of data frames, dfs, if
-     no timestamp is found.
-    Author: PRI
-    Date: Back in the day
-    """
-    # get the global attribute time step
-    ts = int(l1_info["read_excel"]["Global"]["time_step"])
-    # get the data frame for this worksheet
-    df = dfs[df_name]
-    # initialise logicals
-    got_timestamp = False
-    more_than_one = False
-    # first check for columns that qualify
-    if not got_timestamp:
-        # get a list of columns where dtype is datetime64
-        dt_columns = [c for c in df.columns if pandas.api.types.is_datetime64_dtype(df[c])]
-        # check to see if there is more than 1
-        if len(dt_columns) > 1:
-            more_than_one = True
-        # loop over candidate columns
-        for dt_column in dt_columns:
-            # try casting column as datetime
-            try:
-                df[dt_column] = pandas.to_datetime(df[dt_column])
-                # get the time step for this column
-                df_ts = df[dt_column].diff()
-                # get the mode of the time step as minutes
-                df_ts = df_ts.mode().values[0].astype('timedelta64[m]').astype(int)
-                # is the data frame time step the same as the global attribute time step?
-                if df_ts == ts:
-                    # if yes then we have the timestamp column for this data frame
-                    timestamp = dt_column
-                    got_timestamp = True
-                    # and exit the for loop
-                    break
-            except (ParserError, TypeError, ValueError):
-                # pass silently on these errors
-                pass
-    if not got_timestamp:
-        obj_columns = [c for c in df.columns[df.dtypes=='object']]
-        if len(obj_columns) > 1:
-            more_than_one = True
-        for obj_column in obj_columns:
-            try:
-                df[obj_column] = pandas.to_datetime(df[obj_column])
-                # get the time step for this column
-                df_ts = df[obj_column].diff()
-                # get the mode of the time step as minutes
-                df_ts = df_ts.mode().values[0].astype('timedelta64[m]').astype(int)
-                # is the data frame time step the same as the global attribute time step?
-                if df_ts == ts:
-                    # if yes then we have the timestamp column for this data frame
-                    timestamp = obj_column
-                    got_timestamp = True
-                    # and exit the for loop
-                    break
-            except (ParserError, TypeError, ValueError):
-                pass
-    # check to see if we have a timestamp for this sheet
-    if got_timestamp:
-        if more_than_one:
-            # if there was more than 1 timestamp, tell the user which one we are using
-            msg = " Using column " + timestamp + " as the timestamp for sheet " + df_name
-            logger.info(msg)
-    else:
-        # tell the user we couldn't find a timestamp for this sheet
-        msg = "!!!!! Unable to find a timestamp for " + df_name + ", deleting sheet ..."
-        logger.error("!!!!!")
-        logger.error(msg)
-        logger.error("!!!!!")
-        # delete the sheet
-        del dfs[df_name]
-        del l1_info["read_excel"]["xl_sheets"][df_name]
-        # set the timestamp to None
-        timestamp = None
-    return timestamp
-
 def ReadInputFile(l1_info):
     """
     """
@@ -1053,123 +2487,111 @@ def read_eddypro_full(csvname):
 
     return ds
 
-def write_tsv_reddyproc(cf):
+def read_excel_workbook_get_timestamp(dfs, df_name, l1_info):
     """
     Purpose:
-     Write an input file for the REddyProc R scripts using data from an
-     OzFlux-style netCDF file.
-     REddyProc will only read tab separated value files, not comma separated
-     value files.  The default extension for the output file is ".tsv".
+     Check to see if we can get a timestamp for this worksheet.
+     The criteria for accepting a worksheet column as a timestamp are:
+      - pandas must be able to convert it to a datetime
+      - the time step must be the same as the global attribute
+        time step
+        - the time step is calculated as the mode of the differentiated
+          timestamp column
+      - if there are more than 1 columns that qualify, the first is chosen
     Usage:
-     pfp_io.write_tsv_reddyproc(cfg)
-     where cfg is a control file.
     Side effects:
-     Produces a text file (tab separated values) in the same folder as the
-     input file.
+     The worksheet is deleted from the dictionary of data frames, dfs, if
+     no timestamp is found.
     Author: PRI
     Date: Back in the day
     """
-    # get the file names
-    file_path = cf["Files"]["file_path"]
-    nc_name = cf["Files"]["in_filename"]
-    ncFileName = os.path.join(file_path, nc_name)
-    if not os.path.exists(ncFileName):
-        msg = " netCDF file "+ncFileName+" not found"
-        logger.warning(msg)
-        return
-    csv_name = cf["Files"]["out_filename"]
-    csvFileName = os.path.join(file_path, csv_name)
-    file_name = os.path.split(csvFileName)
-    if not os.path.exists(file_name[0]):
-        os.makedirs(file_name[0])
-    # open the csv file
-    csvfile = open(csvFileName,'w', newline='', encoding='utf-8')
-    writer = csv.writer(csvfile,dialect='excel-tab')
-    # read the netCDF file
-    ds = NetCDFRead(ncFileName)
-    if ds.info["returncodes"]["value"] != 0: return
-    # get the datetime series
-    dt = ds.root["Variables"]["DateTime"]["Data"]
-    ts = int(float(ds.root["Attributes"]["time_step"]))
-    # get the start and end indices for whole days
-    start_date = dt[0]
-    end_date = dt[-1]
-    si = pfp_utils.GetDateIndex(dt,str(start_date),ts=ts,default=0,match='startnextday')
-    ei = pfp_utils.GetDateIndex(dt,str(end_date),ts=ts,default=len(dt)-1,match='endpreviousday')
-    dt = dt[si:ei+1]
-    # get the date and time data
-    Year = numpy.array([d.year for d in dt])
-    Ddd = numpy.array([d.timetuple().tm_yday + d.hour/float(24) + d.minute/float(1440) for d in dt])
-    Hhh = numpy.array([d.hour + d.minute/float(60) for d in dt])
-    # get the data
-    data = OrderedDict()
-    labels = list(cf["Variables"].keys())
-    for label in labels:
-        ncname = cf["Variables"][label]["name"]
-        if ncname not in list(ds.root["Variables"].keys()):
-            msg = "Series " + ncname + " not in netCDF file, skipping ..."
-            logger.error(msg)
-            labels.remove(label)
-            continue
-        data[label] = pfp_utils.GetVariable(ds, ncname, start=si, end=ei, out_type="-9999")
-        fmt = cf["Variables"][label]["format"]
-        if "." in fmt:
-            numdec = len(fmt) - (fmt.index(".") + 1)
-            strfmt = "{0:."+str(numdec)+"f}"
-        else:
-            strfmt = "{0:d}"
-        data[label]["fmt"] = strfmt
-    # adjust units as required
-    # this could be done better, pete!
-    for label in labels:
-        if label == "NEE":
-            if data[label]["Attr"]["units"] in ["mg/m^2/s","mgCO2/m^2/s"]:
-                data[label]["Data"] = pfp_mf.Fco2_umolpm2psfrommgCO2pm2ps(data[label]["Data"])
-                data[label]["Attr"]["units"] = "umolm-2s-1"
-            elif data[label]["Attr"]["units"]=='umol/m^2/s':
-                data[label]["Attr"]["units"] = "umolm-2s-1"
-            else:
-                msg = " REddyProc output: unrecognised units for "+label+", returning ..."
-                logger.error(msg)
-                return 0
-        if label == "LE" or label == "H" or label == "Rg":
-            data[label]["Attr"]["units"] = "Wm-2"
-        if label == "Tair" or label == "Tsoil":
-            data[label]["Attr"]["units"] = "degC"
-        if label == "rH" and data[label]["Attr"]["units"] in ["fraction","frac"]:
-            idx = numpy.where(data[label]["Data"]!=c.missing_value)[0]
-            data[label]["Data"][idx] = float(100)*data[label]["Data"][idx]
-            data[label]["Attr"]["units"] = "percent"
-        if label == "VPD" and data[label]["Attr"]["units"] == "kPa":
-            idx = numpy.where(data[label]["Data"]!=c.missing_value)[0]
-            data[label]["Data"][idx] = float(10)*data[label]["Data"][idx]
-            data[label]["Attr"]["units"] = "hPa"
-        if label == "Ustar":
-            if data[label]["Attr"]["units"]=="m/s":
-                data[label]["Attr"]["units"] = "ms-1"
-    # write the variable names to the csv file
-    row_list = ['Year','DoY','Hour']
-    for item in labels:
-        row_list.append(item)
-    writer.writerow(row_list)
-    # write the units line to the csv file
-    units_list = ["-","-","-"]
-    for item in labels:
-        units_list.append(data[item]["Attr"]["units"])
-    writer.writerow(units_list)
-    # now write the data
-    for i in range(len(Year)):
-        data_list = ['%d'%(Year[i]),'%d'%(int(Ddd[i])),'%.1f'%(Hhh[i])]
-        for series in labels:
-            strfmt = data[series]["fmt"]
-            if "d" in strfmt:
-                data_list.append(strfmt.format(int(round(data[series]["Data"][i]))))
-            else:
-                data_list.append(strfmt.format(data[series]["Data"][i]))
-        writer.writerow(data_list)
-    # close the csv file
-    csvfile.close()
-    return 1
+    # get the global attribute time step
+    ts = int(l1_info["read_excel"]["Global"]["time_step"])
+    # get the data frame for this worksheet
+    df = dfs[df_name]
+    # initialise logicals
+    got_timestamp = False
+    more_than_one = False
+    # first check for columns that qualify
+    if not got_timestamp:
+        # get a list of columns where dtype is datetime64
+        dt_columns = [c for c in df.columns if pandas.api.types.is_datetime64_dtype(df[c])]
+        # check to see if there is more than 1
+        if len(dt_columns) > 1:
+            more_than_one = True
+        # loop over candidate columns
+        for dt_column in dt_columns:
+            # try casting column as datetime
+            try:
+                df[dt_column] = pandas.to_datetime(df[dt_column])
+                # get the time step for this column
+                df_ts = df[dt_column].diff()
+                # get the mode of the time step as minutes
+                df_ts = df_ts.mode().values[0].astype('timedelta64[m]').astype(int)
+                # is the data frame time step the same as the global attribute time step?
+                if df_ts == ts:
+                    # if yes then we have the timestamp column for this data frame
+                    timestamp = dt_column
+                    got_timestamp = True
+                    # and exit the for loop
+                    break
+            except (ParserError, TypeError, ValueError):
+                # pass silently on these errors
+                pass
+    if not got_timestamp:
+        obj_columns = [c for c in df.columns[df.dtypes=='object']]
+        if len(obj_columns) > 1:
+            more_than_one = True
+        for obj_column in obj_columns:
+            try:
+                df[obj_column] = pandas.to_datetime(df[obj_column])
+                # get the time step for this column
+                df_ts = df[obj_column].diff()
+                # get the mode of the time step as minutes
+                df_ts = df_ts.mode().values[0].astype('timedelta64[m]').astype(int)
+                # is the data frame time step the same as the global attribute time step?
+                if df_ts == ts:
+                    # if yes then we have the timestamp column for this data frame
+                    timestamp = obj_column
+                    got_timestamp = True
+                    # and exit the for loop
+                    break
+            except (ParserError, TypeError, ValueError):
+                pass
+    # check to see if we have a timestamp for this sheet
+    if got_timestamp:
+        if more_than_one:
+            # if there was more than 1 timestamp, tell the user which one we are using
+            msg = " Using column " + timestamp + " as the timestamp for sheet " + df_name
+            logger.info(msg)
+    else:
+        # tell the user we couldn't find a timestamp for this sheet
+        msg = "!!!!! Unable to find a timestamp for " + df_name + ", deleting sheet ..."
+        logger.error("!!!!!")
+        logger.error(msg)
+        logger.error("!!!!!")
+        # delete the sheet
+        del dfs[df_name]
+        del l1_info["read_excel"]["xl_sheets"][df_name]
+        # set the timestamp to None
+        timestamp = None
+    return timestamp
+
+def SubsetDataStructure(ds_full, subset_labels, subset_attr=None):
+    msg = " Getting subset of data structure"
+    logger.info(msg)
+    ds_subset = DataStructure()
+    if subset_attr is None:
+        ds_subset.root["Attributes"] = copy.deepcopy(ds_full.root["Attributes"])
+    else:
+        if isinstance(subset_attr, dict):
+            ds_subset.root["Attributes"] = copy.deepcopy(subset_attr)
+    if "DateTime" not in subset_labels:
+        subset_labels.append("DateTime")
+    for label in subset_labels:
+        var = pfp_utils.GetVariable(ds_full, label)
+        pfp_utils.CreateVariable(ds_subset, var)
+    return ds_subset
 
 def smap_datetodatadictionary(ds, data_dict, nperday, ndays, si, ei):
     ldt = ds.root["Variables"]["DateTime"]["Data"][si:ei+1]
@@ -1643,27 +3065,6 @@ def write_csv_ep_biomet(cf):
     csvfile.close()
     return 1
 
-def ep_biomet_get_data(cfg, ds):
-    data = {}
-    ep_series_list = cfg["Variables"].keys()
-    for ep_series in ep_series_list:
-        in_name = cfg["Variables"][ep_series]["name"]
-        if in_name not in ds.root["Variables"].keys():
-            logger.error("Series " + in_name + " not in netCDF file, skipping ...")
-            ep_series_list.remove(ep_series)
-            continue
-        data[ep_series] = copy.deepcopy(ds.root["Variables"][in_name])
-        data[ep_series]["name"] = in_name
-        data[ep_series]["units"] = cfg["Variables"][ep_series]["units"]
-        fmt = cfg["Variables"][ep_series]["format"]
-        if "." in fmt:
-            numdec = len(fmt) - (fmt.index(".") + 1)
-            strfmt = "{0:." + str(numdec) + "f}"
-        else:
-            strfmt = "{0:d}"
-        data[ep_series]["format"] = strfmt
-    return data
-
 def write_csv_fluxnet(cf):
     # get the file names
     ncFileName = get_infilenamefromcf(cf)
@@ -1935,12 +3336,6 @@ def write_csv_oneflux_year(cfg, ds):
     return ok
 
 def get_controlfilecontents(cfg_file_uri, mode="verbose"):
-    """
-    Purpose:
-     Open a control fie and return its contents.
-    Author: PRI
-    Date: Back in the day
-    """
     if mode != "quiet":
         logger.info(" Processing the control file")
     try:
@@ -1948,6 +3343,124 @@ def get_controlfilecontents(cfg_file_uri, mode="verbose"):
     except Exception:
         raise RuntimeError("Unable to open control file")
     return cfg
+
+def write_tsv_reddyproc(cf):
+    """
+    Purpose:
+     Write an input file for the REddyProc R scripts using data from an
+     OzFlux-style netCDF file.
+     REddyProc will only read tab separated value files, not comma separated
+     value files.  The default extension for the output file is ".tsv".
+    Usage:
+     pfp_io.write_tsv_reddyproc(cfg)
+     where cfg is a control file.
+    Side effects:
+     Produces a text file (tab separated values) in the same folder as the
+     input file.
+    Author: PRI
+    Date: Back in the day
+    """
+    # get the file names
+    file_path = cf["Files"]["file_path"]
+    nc_name = cf["Files"]["in_filename"]
+    ncFileName = os.path.join(file_path, nc_name)
+    if not os.path.exists(ncFileName):
+        msg = " netCDF file "+ncFileName+" not found"
+        logger.warning(msg)
+        return
+    csv_name = cf["Files"]["out_filename"]
+    csvFileName = os.path.join(file_path, csv_name)
+    file_name = os.path.split(csvFileName)
+    if not os.path.exists(file_name[0]):
+        os.makedirs(file_name[0])
+    # open the csv file
+    csvfile = open(csvFileName,'w', newline='', encoding='utf-8')
+    writer = csv.writer(csvfile,dialect='excel-tab')
+    # read the netCDF file
+    ds = NetCDFRead(ncFileName)
+    if ds.info["returncodes"]["value"] != 0: return
+    # get the datetime series
+    dt = ds.root["Variables"]["DateTime"]["Data"]
+    ts = int(float(ds.root["Attributes"]["time_step"]))
+    # get the start and end indices for whole days
+    start_date = dt[0]
+    end_date = dt[-1]
+    si = pfp_utils.GetDateIndex(dt,str(start_date),ts=ts,default=0,match='startnextday')
+    ei = pfp_utils.GetDateIndex(dt,str(end_date),ts=ts,default=len(dt)-1,match='endpreviousday')
+    dt = dt[si:ei+1]
+    # get the date and time data
+    Year = numpy.array([d.year for d in dt])
+    Ddd = numpy.array([d.timetuple().tm_yday + d.hour/float(24) + d.minute/float(1440) for d in dt])
+    Hhh = numpy.array([d.hour + d.minute/float(60) for d in dt])
+    # get the data
+    data = OrderedDict()
+    labels = list(cf["Variables"].keys())
+    for label in labels:
+        ncname = cf["Variables"][label]["name"]
+        if ncname not in list(ds.root["Variables"].keys()):
+            msg = "Series " + ncname + " not in netCDF file, skipping ..."
+            logger.error(msg)
+            labels.remove(label)
+            continue
+        data[label] = pfp_utils.GetVariable(ds, ncname, start=si, end=ei, out_type="-9999")
+        fmt = cf["Variables"][label]["format"]
+        if "." in fmt:
+            numdec = len(fmt) - (fmt.index(".") + 1)
+            strfmt = "{0:."+str(numdec)+"f}"
+        else:
+            strfmt = "{0:d}"
+        data[label]["fmt"] = strfmt
+    # adjust units as required
+    # this could be done better, pete!
+    for label in labels:
+        if label == "NEE":
+            if data[label]["Attr"]["units"] in ["mg/m^2/s","mgCO2/m^2/s"]:
+                data[label]["Data"] = pfp_mf.Fco2_umolpm2psfrommgCO2pm2ps(data[label]["Data"])
+                data[label]["Attr"]["units"] = "umolm-2s-1"
+            elif data[label]["Attr"]["units"]=='umol/m^2/s':
+                data[label]["Attr"]["units"] = "umolm-2s-1"
+            else:
+                msg = " REddyProc output: unrecognised units for "+label+", returning ..."
+                logger.error(msg)
+                return 0
+        if label == "LE" or label == "H" or label == "Rg":
+            data[label]["Attr"]["units"] = "Wm-2"
+        if label == "Tair" or label == "Tsoil":
+            data[label]["Attr"]["units"] = "degC"
+        if label == "rH" and data[label]["Attr"]["units"] in ["fraction","frac"]:
+            idx = numpy.where(data[label]["Data"]!=c.missing_value)[0]
+            data[label]["Data"][idx] = float(100)*data[label]["Data"][idx]
+            data[label]["Attr"]["units"] = "percent"
+        if label == "VPD" and data[label]["Attr"]["units"] == "kPa":
+            idx = numpy.where(data[label]["Data"]!=c.missing_value)[0]
+            data[label]["Data"][idx] = float(10)*data[label]["Data"][idx]
+            data[label]["Attr"]["units"] = "hPa"
+        if label == "Ustar":
+            if data[label]["Attr"]["units"]=="m/s":
+                data[label]["Attr"]["units"] = "ms-1"
+    # write the variable names to the csv file
+    row_list = ['Year','DoY','Hour']
+    for item in labels:
+        row_list.append(item)
+    writer.writerow(row_list)
+    # write the units line to the csv file
+    units_list = ["-","-","-"]
+    for item in labels:
+        units_list.append(data[item]["Attr"]["units"])
+    writer.writerow(units_list)
+    # now write the data
+    for i in range(len(Year)):
+        data_list = ['%d'%(Year[i]),'%d'%(int(Ddd[i])),'%.1f'%(Hhh[i])]
+        for series in labels:
+            strfmt = data[series]["fmt"]
+            if "d" in strfmt:
+                data_list.append(strfmt.format(int(round(data[series]["Data"][i]))))
+            else:
+                data_list.append(strfmt.format(data[series]["Data"][i]))
+        writer.writerow(data_list)
+    # close the csv file
+    csvfile.close()
+    return 1
 
 def get_ncdtype(Series):
     sd = Series.dtype.name
@@ -2349,7 +3862,7 @@ def netcdf_concatenate_create_ds_out(data, info):
      ds_out = netcdf_concatenate_create_ds_out(data, info)
      where;
       data is a dictionary of data structures with the netCDF file names as the keys.
-      info is the settings dictionary from pfp_compliance.ParseConcatenateControlFile()
+      info is the settings dictionary from pfp_parse.ParseConcatenateControlFile()
     Side effects:
     Author: PRI
     Date: November 2019
@@ -2462,7 +3975,7 @@ def netcdf_concatenate_variable_attributes(ds_out, attr_out, info):
       ds_out is the output data structure
       attr_out is a dictionary of attribute values from each variable from each file
       info is the settings dictionary returned by
-              pfp_compliance.ParseConcatenateControlFile(cf)
+              pfp_parse.ParseConcatenateControlFile(cf)
     Side effects:
     Author: PRI
     Date: November 2019
@@ -2481,7 +3994,7 @@ def netcdf_concatenate_variable_attributes(ds_out, attr_out, info):
         # add "valid_min" and "valid_max"
         attr_final[label]["valid_min"] = []
         attr_final[label]["valid_max"] = []
-        # add the other attributes defined in pfp_compliance.ParseConcatenateControlFile()
+        # add the other attributes defined in pfp_parse.ParseConcatenateControlFile()
         for attr in inc["attributes"]:
             attr_final[label][attr] = []
     # loop over variables and append the attribute values for each variable across all
@@ -2501,7 +4014,7 @@ def netcdf_concatenate_variable_attributes(ds_out, attr_out, info):
                         attr_final[label][attr].append(attrs[attr])
     # loop over variables and concatenate the variable attributes
     for label in labels:
-        # loop over the attributes defined in pfp_compliance.ParseConcatenateControlFile()
+        # loop over the attributes defined in pfp_parse.ParseConcatenateControlFile()
         for attr in inc["attributes"]:
             if attr == "valid_range":
                 # deal with "valid_range"
@@ -2543,7 +4056,7 @@ def netcdf_concatenate_read_input_files(info):
      data = netcdf_concatenate_read_input_files(info)
      where;
       info is the settings dictionary returned by
-              pfp_compliance.ParseConcatenateControlFile(cf)
+              pfp_parse.ParseConcatenateControlFile(cf)
       data is a dictionary of data structures with the netCDF file
               names as the keys.
     Side effects:
@@ -2586,7 +4099,7 @@ def netcdf_concatenate_truncate(ds_in, info):
     Usage:
      ds_out = pfp_io.netcdf_concatenate_truncate(ds, info)
      where ds is the input data structure
-           info is the settings dictionary from pfp_compliance.ParseConcatenateControlFile()
+           info is the settings dictionary from pfp_parse.ParseConcatenateControlFile()
            ds_out is the truncated data structure
     Author: PRI
     Date: November 2019
@@ -3069,456 +4582,6 @@ def nc_read_var(ncFile,ThisOne):
                 attr[vattr] = va
     return data, flag, attr
 
-def ds_update(ds):
-    """
-    Purpose:
-     Update the contents of a data structure.
-     This is where we can change variable names, attributes etc if we change
-     some aspect of netCDF files.  For example, V3.3.0 used for ODW2021
-     used "standard deviation" as a statistic type.  This changed to
-     "statistic_type" in V3.3.1.
-     This routine updates a data structure if required.  If the data structure
-     is modified, the original netCDF file is overwritten with the modified
-     data structure.
-    Usage:
-    Side effects:
-     The original netCDF file is overwritten if the data structure is changed.
-    Author: PRI
-    Date: November 2021
-    """
-    ds_changed = False
-    # update global attributes
-    # trap old files using nc_level and rename to processing_level
-    if "nc_level" in ds.root["Attributes"]:
-        ds.root["Attributes"]["processing_level"] = ds.root["Attributes"]["nc_level"]
-        ds_changed = True
-    # get a list of the variables in the data structure
-    labels = list(ds.root["Variables"].keys())
-    # loop over the variables in the data structure
-    for label in labels:
-        # get the variable
-        variable = pfp_utils.GetVariable(ds, label)
-        # check "statistic_type" is present
-        variable_changed = ds_update_statistic_type(variable)
-        # check to see if this variable has been changed
-        if variable_changed:
-            # write the variable to the data structure if it has changed
-            pfp_utils.CreateVariable(ds, variable)
-            ds_changed = True
-    # check to see if the data structure has changed
-    if ds_changed:
-        # write the changed data structure to file
-        file_name = os.path.basename(ds.info["filepath"])
-        msg = "  Saving updated file " + file_name
-        logger.info(msg)
-        NetCDFWrite(ds.info["filepath"], ds)
-    return ds
-
-def ds_update_statistic_type(variable):
-    """
-    Purpose:
-     Update the statistic_type attribute of a variable.
-    Usage:
-    Author: PRI
-    Date: November 2021
-    """
-    variable_changed = False
-    if variable["Label"] not in ["time", "DateTime"]:
-        if "statistic_type" not in variable["Attr"]:
-            # set the statistic_type attribute
-            variable_changed = True
-            if "Precip" in variable["Label"]:
-                variable["Attr"]["statistic_type"] = "sum"
-            elif variable["Label"][-3:] == "_Sd":
-                variable["Attr"]["statistic_type"] = "standard_deviation"
-            elif variable["Label"][-3:] == "_Vr":
-                variable["Attr"]["statistic_type"] = "variance"
-            else:
-                variable["Attr"]["statistic_type"] = "average"
-        # replace "standard deviation" with "standard_deviation"
-        else:
-            if variable["Attr"]["statistic_type"] == "standard deviation":
-                variable["Attr"]["statistic_type"] = "standard_deviation"
-                variable_changed = True
-    else:
-        pass
-    return variable_changed
-
-def NetCDFRead(nc_file_uri, checktimestep=True, fixtimestepmethod="round", update=False):
-    """
-    Purpose:
-     Wrapper for the pfp_io.nc_read_series() routine so we have a nice name
-     to use.  Over time, pfp_io.nc_read_series() will be rewritten and
-     eventualy deprecated.
-    Usage:
-     ds = pfp_io.NetCDFRead(nc_file_uri)
-     where nc_file_uri is a netCDF file name or URL pointing to a netCDF file
-           ds is a PFP data structure
-    Author: PRI
-    Date: June 2021
-    """
-    if not os.path.isfile(nc_file_uri):
-        msg = nc_file_uri + " not found"
-        logger.error(msg)
-        raise RuntimeError(msg)
-    # file probably exists, so let's read it
-    nc_file = netCDF4.Dataset(nc_file_uri, "r")
-    if len(nc_file.groups.keys()) == 0:
-        ds = nc_read_series(nc_file,
-                            checktimestep=checktimestep,
-                            fixtimestepmethod=fixtimestepmethod)
-    else:
-        ds = nc_read_groups(nc_file)
-    if update:
-        ds = ds_update(ds)
-    return ds
-
-def NetCDFWrite(nc_file_path, ds, nc_type='NETCDF4', outputlist=None, ndims=3):
-    """
-    Purpose:
-     Wrapper for the pfp_io.nc_write_series() routine so we have a nice name
-     to use.  Over time, pfp_io.nc_write_series() will be rewritten and
-     eventualy deprecated.
-    Usage:
-     pfp_io.NetCDFWrite(nc_file_uri, ds)
-     where nc_file_uri is a netCDF file name or URL pointing to a netCDF file
-           ds is a PFP data structure
-    Author: PRI
-    Date: June 2021
-    """
-    file_name = os.path.split(nc_file_path)
-    msg = " Writing netCDF file " + file_name[1]
-    logger.info(msg)
-    try:
-        nc_file = netCDF4.Dataset(nc_file_path, "w", format=nc_type)
-        groups = list(vars(ds))
-        if "info" in groups:
-            groups.remove("info")
-        if len(groups) == 1:
-            # write the global attributes to the netCDF file
-            nc_write_globalattributes(nc_file, ds)
-            nc_write_series(nc_file, ds, outputlist=None, ndims=3)
-        elif len(groups) > 1:
-            # write the global attributes to the netCDF file
-            nc_write_globalattributes(nc_file, ds)
-            for group in groups:
-                dsg = getattr(ds, group)
-                if len(dsg["Variables"]) == 0:
-                    continue
-                nc_group = nc_file.createGroup(group)
-                nc_write_group(nc_group, ds, group)
-        nc_file.close()
-    except Exception:
-        msg = " Unable to write netCDF file " + file_name[1]
-        logger.error(msg)
-        error_message = traceback.format_exc()
-        logger.error(error_message)
-        nc_file.close()
-        return
-    return
-
-def nc_open_write(ncFullName, nctype='NETCDF4', mode="verbose"):
-    """
-    Purpose:
-     Opens a netCDF file object for writing.  The opened netCDF file
-     object is then passed as an argument to pfp_io.nc_write_series, where
-     the actual writing of data occurs.
-    Usage:
-     nc_name = '../Sites/Whroo/Data/Processed/all/Whroo_L4.nc'
-     nc_file = pfp_io.nc_open_write(nc_name)
-     where nc_name is the ful file name of the netCDF to be written
-           nc_file is the returned netCDF file object
-    Author: PRI
-    Date: Back in the day
-    """
-    file_name = os.path.split(ncFullName)
-    if mode != "quiet":
-        logger.info(" Opening netCDF file " + file_name[1])
-    try:
-        ncFile = netCDF4.Dataset(ncFullName, "w", format=nctype)
-    except:
-        logger.error(" Unable to open netCDF file " + file_name[1] + " for writing")
-        ncFile = None
-    return ncFile
-
-def nc_write_globalattributes(nc_file, ds, flag_defs=True):
-    """
-    Purpose:
-    Usage:
-    Author: PRI
-    Date: Back in the day
-    """
-    # check to see if we have a DataStructure or a dictionary
-    if isinstance(ds, DataStructure):
-        # get a local dictionary from a DataStructure
-        lds = {"globalattributes": ds.root["Attributes"],
-               "variables": ds.root["Variables"]}
-    elif isinstance(ds, dict):
-        # check to see if 'globalattributes' and 'variables' in dictionary
-        if (("globalattributes" in ds) and ("variables" in ds)):
-            lds = {"globalattributes": ds["globalattributes"],
-                   "variables": ds["variables"]}
-        else:
-            msg = "Dict doesn't contain expected contents "
-            msg += "'globalattributes' or 'variables'"
-            logger.error(msg)
-            raise RuntimeError(msg)
-    else:
-        msg = "Expected DataStructure or dictionary for 'ds'"
-        msg += ", got " + type(ds)
-        logger.error(msg)
-        raise RuntimeError(msg)
-    lds["globalattributes"]["pyfluxpro_version"] = str(cfg.version_name)+' '+str(cfg.version_number)
-    if "DateTime" in lds["variables"]:
-        ldt = lds["variables"]["DateTime"]["Data"]
-        lds["globalattributes"]["time_coverage_start"] = str(ldt[0])
-        lds["globalattributes"]["time_coverage_end"] = str(ldt[-1])
-    t = time.localtime()
-    lds["globalattributes"]["date_created"] = str(datetime.datetime(t[0],t[1],t[2],t[3],t[4],t[5]))
-    gattrs = sorted(list(lds["globalattributes"].keys()))
-    flags = []
-    attrs = []
-    for item in gattrs:
-        if "Flag" in item:
-            flags.append(item)
-        else:
-            attrs.append(item)
-    for item in attrs:
-        if isinstance(lds["globalattributes"][item], str):
-            attr = lds["globalattributes"][item].encode('ascii', 'ignore')
-        else:
-            attr = str(lds["globalattributes"][item])
-        setattr(nc_file, item, attr)
-    if flag_defs:
-        for item in flags:
-            if isinstance(lds["globalattributes"][item], str):
-                attr = lds["globalattributes"][item].encode('ascii', 'ignore')
-            else:
-                attr = str(lds["globalattributes"][item])
-            setattr(nc_file, item, attr)
-    return
-
-def nc_write_group(nc_obj, ds, group):
-    """
-    Purpose:
-     Write the L6 summary statistics (daily, monthly, annual and cumulative)
-     to a single netCDF file with different groups for each time period.
-    Usage:
-    Author: PRI
-    Date: January 2018
-    """
-    dsr = getattr(ds, "root")
-    dsg = getattr(ds, group)
-    # sanity check
-    if "Attributes" not in list(dsg.keys()):
-        msg = " Data structure group " + group + " has no 'Attributes'"
-        logger.error(msg)
-        raise RuntimeError(msg)
-    if "Variables" not in list(dsg.keys()):
-        msg = " Data structure group " + group + " has no 'Variables'"
-        logger.error(msg)
-        raise RuntimeError(msg)
-    # write the group attributes
-    gattrs = sorted(list(dsg["Attributes"].keys()))
-    for gattr in gattrs:
-        setattr(nc_obj, gattr, dsg["Attributes"][gattr])
-    # write the group variables
-    gvars = sorted(list(dsg["Variables"].keys()))
-    if len(gvars) == 0:
-        return
-    dt = dsg["Variables"]["DateTime"]["Data"]
-    nrecs = len(dt)
-    # and give it dimensions of time, latitude and longitude
-    nc_obj.createDimension("time", nrecs)
-    nc_obj.createDimension("latitude", 1)
-    nc_obj.createDimension("longitude", 1)
-    dims = ("time", "latitude", "longitude")
-    # write the time variable to the netCDF object
-    nc_time_units = "days since 1800-01-01 00:00:00.0"
-    nc_time = pfp_utils.get_nctime_from_datetime_data(dt, nc_time_units=nc_time_units)
-    nc_var = nc_obj.createVariable("time", "d", ("time",))
-    nc_var[:] = nc_time
-    nc_var.setncattr("long_name", "time")
-    nc_var.setncattr("standard_name", "time")
-    nc_var.setncattr("units", nc_time_units)
-    # write the latitude and longitude variables to the group
-    nc_var = nc_obj.createVariable("latitude", "d", ("latitude",))
-    nc_var[:] = float(dsr["Attributes"]["latitude"])
-    nc_var.setncattr('long_name', 'latitude')
-    nc_var.setncattr('standard_name', 'latitude')
-    nc_var.setncattr('units', 'degrees north')
-    nc_var = nc_obj.createVariable("longitude", "d", ("longitude",))
-    nc_var[:] = float(dsr["Attributes"]["longitude"])
-    nc_var.setncattr('long_name', 'longitude')
-    nc_var.setncattr('standard_name', 'longitude')
-    nc_var.setncattr('units', 'degrees east')
-    # get a list of variables to write to the netCDF file
-    labels = sorted([l for l in list(dsg["Variables"].keys()) if l not in ["DateTime", "time"]])
-    # write the variables to the netCDF file object
-    for label in labels:
-        nc_var = nc_obj.createVariable(label, "d", dims)
-        nc_var[:, 0, 0] = dsg["Variables"][label]["Data"].tolist()
-        for attr_key in dsg["Variables"][label]["Attr"]:
-            if attr_key not in ["format"]:
-                attr_value = dsg["Variables"][label]["Attr"][attr_key]
-                nc_var.setncattr(attr_key, attr_value)
-    return
-
-def nc_write_series(ncFile, ds, outputlist=None, ndims=3):
-    """
-    Purpose:
-     Write the contents of a data structure to a netCDF file.
-    Usage:
-     nc_file = pfp_io.nc_open_write(nc_name)
-     pfp_io.nc_write_series(nc_file,ds)
-     where nc_file is a netCDF file object returned by pfp_io.nc_open_write
-           ds is a data structure
-    Author: PRI
-    Date: Back in the day
-    """
-    # we specify the size of the Time dimension because netCDF4 is slow to write files
-    # when the Time dimension is unlimited
-    nRecs = int(ds.root["Attributes"]['nc_nrecs'])
-    ncFile.createDimension("time",nRecs)
-    if ndims==3:
-        ncFile.createDimension("latitude",1)
-        ncFile.createDimension("longitude",1)
-        dims = ("time","latitude","longitude")
-    else:
-        dims = ("time",)
-    if outputlist is None:
-        outputlist = list(ds.root["Variables"].keys())
-    else:
-        for ThisOne in outputlist:
-            if ThisOne not in list(ds.root["Variables"].keys()):
-                logger.warning(" Requested series "+ThisOne+" not found in data structure")
-                outputlist.remove(ThisOne)
-        if len(outputlist)==0: outputlist = list(ds.root["Variables"].keys())
-    # can't write an array of Python datetime objects to a netCDF file
-    # actually, this could be written as characters
-    for ThisOne in ["DateTime","DateTime_UTC"]:
-        if ThisOne in outputlist: outputlist.remove(ThisOne)
-    # Update the time variable from the Python datetime
-    pfp_utils.get_nctime_from_datetime(ds)
-    ldt = pfp_utils.GetVariable(ds, "time")
-    ncVar = ncFile.createVariable("time","d",("time",))
-    ncVar[:] = numpy.ma.getdata(ldt["Data"])
-    for item in ldt["Attr"]:
-        setattr(ncVar, item, ldt["Attr"][item])
-    if "time" in outputlist: outputlist.remove("time")
-    # now write the latitude and longitude variables
-    if "latitude" not in ds.root["Attributes"]: ndims = 1
-    if "longitude" not in ds.root["Attributes"]: ndims = 1
-    if ndims==3:
-        if "latitude" not in outputlist:
-            ncVar = ncFile.createVariable("latitude","d",("latitude",))
-            ncVar[:] = pfp_utils.convert_anglestring(str(ds.root["Attributes"]["latitude"]))
-            setattr(ncVar,'long_name','latitude')
-            setattr(ncVar,'standard_name','latitude')
-            setattr(ncVar,'units','degree_north')
-        if "longitude" not in outputlist:
-            ncVar = ncFile.createVariable("longitude","d",("longitude",))
-            ncVar[:] = pfp_utils.convert_anglestring(str(ds.root["Attributes"]["longitude"]))
-            setattr(ncVar,'long_name','longitude')
-            setattr(ncVar,'standard_name','longitude')
-            setattr(ncVar,'units','degree_east')
-    # now make sure the date and time series are not in outputlist
-    datetimelist = ['xlDateTime','Year','Month','Day','Hour','Minute','Second','Hdh','Ddd']
-    for ThisOne in datetimelist:
-        if ThisOne in outputlist:
-            outputlist.remove(ThisOne)
-    # write everything else to the netCDF file
-    for ThisOne in sorted(outputlist):
-        nc_write_var(ncFile,ds,ThisOne,dims)
-    # write the coordinate reference system (crs) variable
-    if "crs" not in outputlist:
-        ncVar = ncFile.createVariable("crs","i",())
-        setattr(ncVar,"grid_mapping_name","latitude_longitude")
-        setattr(ncVar,"long_name","WGS 1984 datum")
-        setattr(ncVar,"longitude_of_prime_meridian","0.0")
-        setattr(ncVar,"semi_major_axis","6378137.0")
-        setattr(ncVar,"inverse_flattening","298.257223563")
-    # write the station_name variable
-    site_name = ds.root["Attributes"]["site_name"]
-    site_name = site_name.rstrip().lstrip().replace(" ", "")
-    ncFile.createDimension("name_strlen", len(site_name))
-    ncVar = ncFile.createVariable("station_name", "c", ("name_strlen",))
-    ncVar[:] = site_name
-    setattr(ncVar, "long_name", "station name")
-    setattr(ncVar, "cf_role", "timeseries_id")
-    return
-
-def nc_write_var(ncFile, ds, ThisOne, dim):
-    """
-    Purpose:
-     Function to write data from a series in the data structure to a netCDF variable.
-    Usage:
-     nc_write_var(ncFile,ds,ThisOne,("time","latitude","longitude"))
-      where ncFile is a netCDF file object
-            ds is the data structure
-            ThisOne is the label of a series in ds
-            ("time","latitude","longitude") is the dimension tuple
-    Author: PRI
-    Date: August 2014
-    """
-    # get the data type of the series in ds
-    dt = get_ncdtype(ds.root["Variables"][ThisOne]["Data"])
-    # create the netCDF variable
-    try:
-        ncVar = ncFile.createVariable(ThisOne, dt, dim)
-    except RuntimeError:
-        msg = "Error writing variable to netCDF file: "+ThisOne
-        raise Exception(msg)
-    # different writes to the variable depending on whether it is 1D or 3D
-    if len(dim) == 1:
-        ncVar[:] = ds.root["Variables"][ThisOne]["Data"].tolist()
-    elif len(dim) == 3:
-        ncVar[:, 0, 0] = ds.root["Variables"][ThisOne]["Data"].tolist()
-    else:
-        msg = "Unrecognised dimension request for netCDF variable: "+ThisOne
-        raise RuntimeError(msg)
-    # write the attributes
-    vattrs = sorted(list(ds.root["Variables"][ThisOne]["Attr"].keys()))
-    for item in vattrs:
-        if item not in ["_FillValue", "missing_value", "valid_max", "vaild_min", "valid_range"]:
-            attr = str(ds.root["Variables"][ThisOne]["Attr"][item])
-            ncVar.setncattr(item, attr)
-    # write the valid_range attribute
-    if dt == "d":
-        if "valid_range" in ds.root["Variables"][ThisOne]["Attr"]:
-            try:
-                valid_range = [float(l) for l in ds.root["Variables"][ThisOne]["Attr"]["valid_range"].split(",")]
-                ncVar.setncattr("valid_range", valid_range)
-            except Exception:
-                msg = " Unable to write valid_range attribute for " + ThisOne
-                msg+= ", skipping ..."
-                logger.warning(msg)
-    else:
-        if "valid_range" in ds.root["Variables"][ThisOne]["Attr"]:
-            try:
-                valid_range = [int(l) for l in ds.root["Variables"][ThisOne]["Attr"]["valid_range"].split(",")]
-                ncVar.setncattr("valid_range", valid_range)
-            except Exception:
-                msg = " Unable to write valid_range attribute for " + ThisOne
-                msg+= ", skipping ..."
-                logger.warning(msg)
-    # get the data type of the QC flag
-    dt = get_ncdtype(ds.root["Variables"][ThisOne]["Flag"])
-    # create the variable
-    ncVar = ncFile.createVariable(ThisOne+"_QCFlag", dt, dim)
-    # write 1D or 3D
-    if len(dim)==1:
-        ncVar[:] = ds.root["Variables"][ThisOne]["Flag"].tolist()
-    elif len(dim)==3:
-        ncVar[:, 0, 0] = ds.root["Variables"][ThisOne]["Flag"].tolist()
-    else:
-        msg = "Unrecognised dimension request for netCDF variable: "+ThisOne
-        raise RuntimeError(msg)
-    # set the attributes
-    ncVar.setncattr("long_name", ThisOne+"QC flag")
-    ncVar.setncattr("units", "1")
-    return
-
 def xl_open_write(xl_name):
     xl_filename = os.path.basename(xl_name)
     msg = " Opening " + xl_filename + " for writing"
@@ -3716,7 +4779,10 @@ def xl_write_data(xl_sheet, dsg, labels=None, xlCol=0):
         labels = list(dsg["Variables"].keys())
     xl_sheet.write(1, xlCol, dsg["Variables"]["DateTime"]["Attr"]["units"])
     nrows = len(dsg["Variables"]["DateTime"]["Data"])
-    d_xf = xlwt.easyxf(num_format_str=dsg["Variables"]["DateTime"]["Attr"]["format"])
+    if "format" in dsg["Variables"]["DateTime"]["Attr"]:
+        d_xf = xlwt.easyxf(num_format_str=dsg["Variables"]["DateTime"]["Attr"]["format"])
+    else:
+        d_xf = xlwt.easyxf(num_format_str="yyyy-mm-dd hh:mm")
     for j in range(nrows):
         xl_sheet.write(j+2, xlCol, dsg["Variables"]["DateTime"]["Data"][j], d_xf)
     if "DateTime" in labels:
@@ -3726,7 +4792,10 @@ def xl_write_data(xl_sheet, dsg, labels=None, xlCol=0):
         xlCol = xlCol + 1
         xl_sheet.write(0, xlCol, dsg["Variables"][item]["Attr"]["units"])
         xl_sheet.write(1, xlCol, item)
-        d_xf = xlwt.easyxf(num_format_str=dsg["Variables"][item]["Attr"]["format"])
+        if "format" in dsg["Variables"][item]["Attr"]:
+            d_xf = xlwt.easyxf(num_format_str=dsg["Variables"][item]["Attr"]["format"])
+        else:
+            d_xf = xlwt.easyxf(num_format_str="general")
         if numpy.ma.isMA(dsg["Variables"][item]["Data"]):
             tmp = numpy.ma.filled(dsg["Variables"][item]["Data"],fill_value=c.missing_value)
         else:

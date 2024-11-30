@@ -17,9 +17,6 @@ from matplotlib.backend_tools import ToolToggleBase
 import numpy
 from scipy import stats
 import statsmodels.api as sm
-#from windrose import WindroseAxes
-#from windrose_subplot import WindroseAxes
-import windrose
 # PFP modules
 from scripts import constants as c
 from scripts import pfp_ck

@@ -7,9 +7,9 @@ level = L1
     out_filename = Right click to browse (*.nc)
 [Global]
     Conventions = CF-1.8
-    acknowledgement = '''This work used eddy covariance data collected by the TERN Ecosystem
-Processes facility. Ecosystem Processes would like to acknowledge the financial support of the
-Australian Federal Government via the National Collaborative Research Infrastructure Scheme
+    acknowledgement = '''This work used eddy covariance data collected by the TERN Ecosystem 
+Processes facility. Ecosystem Processes would like to acknowledge the financial support of the 
+Australian Federal Government via the National Collaborative Research Infrastructure Scheme 
 and the Education Investment Fund.'''
     altitude = <altitude>m
     canopy_height = <canopy_height>m
@@ -54,7 +54,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <irga_type>
             long_name = CO2 concentration
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = mg/m^3
         [[[xl]]]
             name = CO2_density_SIGMA
@@ -101,7 +101,7 @@ and the Education Investment Fund.'''
         [[[Attr]]]
             height = <height>m
             instrument = <irga_type>,<sonic_type>
-            long_name = Carbon dioxide flux EasyFlux accepted samples
+            long_name = CO2 flux EasyFlux accepted samples
             statistic_type = sum
             units = 1
         [[[xl]]]
@@ -111,7 +111,7 @@ and the Education Investment Fund.'''
         [[[Attr]]]
             height = <height>m
             instrument = <irga_type>,<sonic_type>
-            long_name = Carbon dioxide flux EasyFlux QC flag
+            long_name = CO2 flux EasyFlux QC flag
             statistic_type = average
             units = 1
         [[[xl]]]
@@ -315,7 +315,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <irga_type>
             long_name = H2O concentration
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = g/m^3
         [[[xl]]]
             name = H2O_density_SIGMA
@@ -422,6 +422,7 @@ and the Education Investment Fund.'''
             instrument = <instrument_type>
             long_name = Panel temperature at logger
             units = degC
+            statistic_type = average
         [[[xl]]]
             name = T_panel
             sheet = Notes
@@ -462,9 +463,10 @@ and the Education Investment Fund.'''
         [[[Attr]]]
             height = <height>m
             instrument = <sonic_type>
-            long_name = Scaling temperature
+            long_name = Soil temperature
             statistic_type = average
             units = degC
+            standard_name = soil_temperature
         [[[xl]]]
             name = TSTAR
             sheet = CSFormat
@@ -484,7 +486,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <sonic_type>
             long_name = Virtual temperature
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = degC
         [[[xl]]]
             name = T_SONIC_SIGMA
@@ -554,7 +556,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <sonic_type>
             long_name = Longitudinal wind velocity component, sonic coordinates
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = m/s
         [[[xl]]]
             name = Ux_SIGMA
@@ -614,7 +616,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <sonic_type>
             long_name = Lateral wind velocity component, sonic coordinates
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = m/s
         [[[xl]]]
             name = Uy_SIGMA
@@ -664,7 +666,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <sonic_type>
             long_name = Vertical wind velocity component, sonic coordinates
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = m/s
         [[[xl]]]
             name = Uz_SIGMA
@@ -674,6 +676,7 @@ and the Education Investment Fund.'''
             instrument = <instrument_type>
             long_name = Battery voltage at logger
             units = V
+            statistic_type = average
         [[[xl]]]
             name = batt_volt
             sheet = Notes
@@ -693,7 +696,7 @@ and the Education Investment Fund.'''
             height = <height>m
             instrument = <sonic_type>
             long_name = Wind direction
-            statistic_type = standard deviation
+            statistic_type = standard_deviation
             units = degrees
         [[[xl]]]
             name = WD_SIGMA

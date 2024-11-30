@@ -70,42 +70,79 @@ def ApplyRangeCheckToVariable(variable):
         variable["Attr"]["valid_range"] = valid_range
     return
 
-def ApplyTurbulenceFilter(cf, ds, l5_info, ustar_threshold=None):
+def ApplyTurbulenceFilter(ds, info, ustar_threshold=None):
     """
     Purpose:
     Usage:
     Author:
     Date:
     """
-    iris = l5_info["RemoveIntermediateSeries"]
-    opt = ApplyTurbulenceFilter_checks(cf, ds)
-    if not opt["OK"]:
-        return
-    # dictionary of utar thresold values
-    if ustar_threshold == None:
-        ustar_dict = pfp_rp.get_ustar_thresholds(cf, ds)
-        if ds.info["returncodes"]["value"] != 0:
-            return
-    else:
-        ustar_dict = pfp_rp.get_ustar_thresholds_annual(ldt, ustar_threshold)
-    # initialise a dictionary for the indicator series
-    indicators = {}
+    cfg = info["cfg"]
+    iatf = info["ApplyTurbulenceFilter"]
+    iris = info["RemoveIntermediateSeries"]
     # local point to datetime series
     ldt = pfp_utils.GetVariable(ds, "DateTime")
     # get data for the indicator series
     ustar = pfp_utils.GetVariable(ds, "ustar")
+    # dictionary of utar thresold values
+    if ustar_threshold is None:
+        ustar_dict = pfp_rp.get_ustar_thresholds(cfg, ds)
+    elif isinstance(ustar_threshold, dict):
+        ustar_dict = copy.deepcopy(ustar_threshold)
+    else:
+        ustar_dict = pfp_rp.get_ustar_thresholds_annual(ldt, ustar_threshold)
+    # get the indicator series
+    indicators = apply_turbulence_filter_get_indicators(ds, info, ustar_dict)
+    # write the turbulence indicator to the data structure
+    for item in list(indicators["turbulence"].keys()):
+        pfp_utils.CreateVariable(ds, indicators["turbulence"][item])
+        iris["not_output"].append(indicators["turbulence"][item]["Label"])
+    # write the day, night and evening indicators to the data structure
+    pfp_utils.CreateVariable(ds, indicators["day"])
+    iris["not_output"].append(indicators["day"]["Label"])
+    # write the final indicator to the data structure
+    pfp_utils.CreateVariable(ds, indicators["final"])
+    iris["not_output"].append(indicators["final"]["Label"])
+    # loop over the series to be filtered
+    filter_list = iatf["filter_list"]
+    for label in filter_list:
+        msg = " Applying " + iatf["turbulence_filter"] + " filter to " + label
+        logger.info(msg)
+        # get the data
+        var = pfp_utils.GetVariable(ds, label)
+        if apply_turbulence_filter_check_filtered(ds, var):
+            continue
+        apply_turbulence_filter_save_notfiltered(ds, var)
+        # now apply the filter
+        var_filtered = apply_turbulence_filter_do_filter(ds, var, indicators, ustar_dict)
+        pfp_utils.CreateVariable(ds, var_filtered)
+        iris["not_output"].append(var_filtered["Label"])
+        nnf = numpy.ma.count(var["Data"])
+        nf = numpy.ma.count(var_filtered["Data"])
+        pc = int(100 * (float(nnf - nf) / float(nnf)) + 0.5)
+        msg = "  " + iatf["turbulence_filter"] + " filter removed " + str(pc)
+        msg += "% of available data from " + label
+        logger.info(msg)
+    return
+def apply_turbulence_filter_get_indicators(ds, info, ustar_dict):
+    iatf = info["ApplyTurbulenceFilter"]
+    ldt = pfp_utils.GetVariable(ds, "DateTime")
+    ustar = pfp_utils.GetVariable(ds, "ustar")
+    # initialise a dictionary for the indicator series
+    indicators = {}
     # get the day/night indicator
-    indicators["day"] = pfp_rp.get_day_indicator(cf, ds)
+    indicators["day"] = pfp_rp.get_day_indicator(info["cfg"], ds)
     ind_day = indicators["day"]["Data"]
     # get the turbulence indicator series
-    if opt["turbulence_filter"].lower() in ["ustar", "ustar (basic)"]:
+    turbulence_filter = iatf["turbulence_filter"]
+    if turbulence_filter.lower() in ["ustar", "ustar (basic)"]:
         # indicators["turbulence"] = 1 ==> turbulent, indicators["turbulence"] = 0 ==> not turbulent
         indicators["turbulence"] = pfp_rp.get_turbulence_indicator_ustar_basic(ldt, ustar, ustar_dict)
         # initialise the final indicator series as the turbulence indicator
         # subsequent filters will modify the final indicator series
         indicators["final"] = copy.deepcopy(indicators["turbulence"]["basic"])
         indicators["final"]["Label"] = "indicator_turbulence_final"
-    elif opt["turbulence_filter"].lower() == "ustar (evgb)":
+    elif turbulence_filter.lower() == "ustar (evgb)":
         # ustar >= threshold during day AND ustar has been >= threshold since sunset ==> indicators["turbulence"] = 1
         # indicators["turbulence"] = 0 during night once ustar has dropped below threshold even if it
         # increases above the threshold later in the night
@@ -114,7 +151,7 @@ def ApplyTurbulenceFilter(cf, ds, l5_info, ustar_threshold=None):
         # subsequent filters will modify the final indicator series
         indicators["final"] = copy.deepcopy(indicators["turbulence"]["evgb"])
         indicators["final"]["Label"] = "indicator_turbulence_final"
-    elif opt["turbulence_filter"].lower() in ["ustar (fluxnet)", "ustar (fluxnet+day)"]:
+    elif turbulence_filter.lower() in ["ustar (fluxnet)", "ustar (fluxnet+day)"]:
         # ustar >= threshold ==> indicators["turbulence"] = 1
         # BUT ...
         # if ustar[i] < threshold and ustar[i+1] >= threshold then
@@ -127,14 +164,14 @@ def ApplyTurbulenceFilter(cf, ds, l5_info, ustar_threshold=None):
         indicators["final"]["Label"] = "indicator_turbulence_final"
     else:
         msg = " Unrecognised turbulence filter option ("
-        msg = msg + opt["turbulence_filter"] + "), no filter applied"
+        msg = msg + turbulence_filter + "), no filter applied"
         logger.error(msg)
         return
-    # check to see if the user wants to accept all day time observations
-    # regardless of ustar value
-    if opt["accept_day_times"].lower() == "yes":
+    # check to see if the user wants to accept all day time observations regardless of ustar value
+    accept_day_times = iatf["accept_day_times"]
+    if accept_day_times.lower() == "yes":
         # FluxNet method applies ustar filter to day time data
-        if opt["turbulence_filter"].lower() not in ["ustar (fluxnet)"]:
+        if turbulence_filter.lower() not in ["ustar (fluxnet)"]:
             # if yes, then we force the final indicator to be 1
             # when ustar is below the threshold during the day ...
             c1 = (indicators["day"]["Data"] == 1)
@@ -146,127 +183,42 @@ def ApplyTurbulenceFilter(cf, ds, l5_info, ustar_threshold=None):
         else:
             msg = " u* filter applied to day time data (FluxNet method)"
             logger.warning(msg)
-    # write the turbulence indicator to the data structure
-    for item in list(indicators["turbulence"].keys()):
-        pfp_utils.CreateVariable(ds, indicators["turbulence"][item])
-        iris["not_output"].append(indicators["turbulence"][item]["Label"])
-    # write the day, night and evening indicators to the data structure
-    pfp_utils.CreateVariable(ds, indicators["day"])
-    iris["not_output"].append(indicators["day"]["Label"])
-    # write the final indicator to the data structure
-    pfp_utils.CreateVariable(ds, indicators["final"])
-    iris["not_output"].append(indicators["final"]["Label"])
-
-    # loop over the series to be filtered
-    descr_level = "description_" + ds.root["Attributes"]["processing_level"]
-    for label in opt["filter_list"]:
-        msg = " Applying " + opt["turbulence_filter"] + " filter to " + label
-        logger.info(msg)
-        # get the data
-        var = pfp_utils.GetVariable(ds, label)
-        # continue to next series if this series has been filtered before
-        if "turbulence_filter" in var["Attr"]:
-            msg = " Series " + label + " has already been filtered, skipping ..."
-            logger.warning(msg)
-            continue
-        # save the non-filtered data
+    return indicators
+def apply_turbulence_filter_check_filtered(ds, var):
+    filtered = False
+    if "turbulence_filter" in var["Attr"]:
+        msg = " Series " + var["Label"] + " has already been filtered, skipping ..."
+        logger.warning(msg)
+        filtered = True
+    return filtered
+def apply_turbulence_filter_save_notfiltered(ds, var):
+    # save the non-filtered data
+    nofilter = var["Label"] + "_nofilter"
+    if nofilter not in ds.root["Variables"].keys():
         var_nofilter = copy.deepcopy(var)
-        var_nofilter["Label"] = var["Label"] + "_nofilter"
+        var_nofilter["Label"] = nofilter
         pfp_utils.CreateVariable(ds, var_nofilter)
-        iris["not_output"].append(var_nofilter["Label"])
-        # now apply the filter
-        var_filtered = copy.deepcopy(var)
-        var_filtered["Data"] = numpy.ma.masked_where(indicators["final"]["Data"] == 0,
-                                                     var["Data"], copy=True)
-        var_filtered["Flag"] = numpy.copy(var["Flag"])
-        idx = numpy.where(indicators["final"]["Data"] == 0)[0]
-        var_filtered["Flag"][idx] = numpy.int32(61)
-        # update the "description" attribute
-        pfp_utils.append_to_attribute(var_filtered["Attr"], {descr_level: "turbulence filter applied"})
-        # and write the filtered data to the data structure
-        # write the annual ustar thresholds to the variable attributes
-        for year in sorted(list(ustar_dict.keys())):
-            var_filtered["Attr"]["ustar_threshold_" + str(year)] = str(ustar_dict[year]["ustar_mean"])
-        pfp_utils.CreateVariable(ds, var_filtered)
-        # and write a copy of the filtered data to the data structure so it
-        # will still exist once the gap filling has been done
-        var_filtered["Label"] = str(label) + "_filtered"
-        pfp_utils.CreateVariable(ds, var_filtered)
-        iris["not_output"].append(var_filtered["Label"])
-        nnf = numpy.ma.count(var["Data"])
-        nf = numpy.ma.count(var_filtered["Data"])
-        pc = int(100 * (float(nnf - nf) / float(nnf)) + 0.5)
-        msg = "  " + opt["turbulence_filter"] + " filter removed " + str(pc)
-        msg += "% of available data from " + label
-        logger.info(msg)
+        #iris["not_output"].append(var_nofilter["Label"])
     return
-
-def ApplyTurbulenceFilter_checks(cf, ds):
-    """
-    Purpose:
-    Usage:
-    Author:
-    Date:
-    """
-    opt = {"OK":True, "turbulence_filter":"ustar", "filter_list":["Fco2"]}
-    # return if there is no Options section in control file
-    if "Options" not in cf:
-        msg = " ApplyTurbulenceFilter: Options section not found in control file"
-        logger.warning(msg)
-        opt["OK"] = False
-        return opt
-    # get the value of the TurbulenceFilter key in the Options section
-    opt["turbulence_filter"] = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "TurbulenceFilter", default="ustar")
-    # return if turbulence filter disabled
-    if opt["turbulence_filter"].lower() == "none":
-        logger.warning("!!!")
-        msg = "!!! Turbulence filter disabled in control file at "
-        msg += ds.root["Attributes"]["processing_level"]
-        logger.warning(msg)
-        logger.warning("!!!")
-        opt["OK"] = False
-        return opt
-    # check to see if filter type can be handled
-    if opt["turbulence_filter"].lower() not in ["ustar", "ustar (basic)", "ustar (evgb)",
-                                                "ustar (fluxnet)", "ustar (fluxnet+day)"]:
-        msg = " Unrecognised turbulence filter option ("
-        msg = msg+opt["turbulence_filter"]+"), no filter applied"
-        logger.error(msg)
-        opt["OK"] = False
-        return opt
-    # get the list of series to be filtered
-    if "FilterList" in cf["Options"]:
-        filter_string = cf["Options"]["FilterList"]
-        if "," in filter_string:
-            opt["filter_list"] = filter_string.split(",")
-        else:
-            opt["filter_list"] = [filter_string]
-    # check to see if the series are in the data structure
-    for item in list(opt["filter_list"]):
-        if item not in list(ds.root["Variables"].keys()):
-            msg = " Series "+item+" given in FilterList not found in data stucture"
-            logger.warning(msg)
-            opt["filter_list"].remove(item)
-    # return if the filter list is empty
-    if len(opt["filter_list"]) == 0:
-        msg = " FilterList in control file is empty, skipping turbulence filter"
-        logger.warning(msg)
-        opt["OK"] = False
-        return opt
-    # get the value of the DayNightFilter key in the Options section
-    opt["daynight_filter"] = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "DayNightFilter", default="Fsd")
-    # check to see if filter type can be handled
-    if opt["daynight_filter"].lower() not in ["fsd", "sa", "none"]:
-        msg = " Unrecognised day/night filter option ("
-        msg = msg+opt["daynight_filter"]+"), no filter applied"
-        logger.error(msg)
-        opt["OK"] = False
-        return opt
-    # check to see if all day time values are to be accepted
-    opt["accept_day_times"] = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "AcceptDayTimes", default="Yes")
-    opt["use_evening_filter"] = pfp_utils.get_keyvaluefromcf(cf, ["Options"], "UseEveningFilter", default="No")
-
-    return opt
+def apply_turbulence_filter_do_filter(ds, var, indicators, ustar_dict):
+    descr_level = "description_" + ds.root["Attributes"]["processing_level"]
+    var_filtered = copy.deepcopy(var)
+    var_filtered["Data"] = numpy.ma.masked_where(indicators["final"]["Data"] == 0,
+                                                 var["Data"], copy=True)
+    var_filtered["Flag"] = numpy.copy(var["Flag"])
+    idx = numpy.where(indicators["final"]["Data"] == 0)[0]
+    var_filtered["Flag"][idx] = numpy.int32(61)
+    # update the "description" attribute
+    pfp_utils.append_to_attribute(var_filtered["Attr"], {descr_level: "turbulence filter applied"})
+    # and write the filtered data to the data structure
+    # write the annual ustar thresholds to the variable attributes
+    for year in sorted(list(ustar_dict.keys())):
+        var_filtered["Attr"]["ustar_threshold_" + str(year)] = str(ustar_dict[year]["ustar_mean"])
+    pfp_utils.CreateVariable(ds, var_filtered)
+    # and write a copy of the filtered data to the data structure so it
+    # will still exist once the gap filling has been done
+    var_filtered["Label"] = str(var["Label"]) + "_filtered"
+    return var_filtered
 
 def cliptorange(data, lower, upper):
     data = rangecheckserieslower(data,lower)
